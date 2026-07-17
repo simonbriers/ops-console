@@ -395,6 +395,70 @@ string gets built. Any new function that splices `remote_dir` into an SSH
 command needs to call this first — that's the actual lesson, not just the
 patch.
 
+## The New Client wizard: provisioning a client end to end
+
+Standing up a new client used to mean a human working through a 10+ step
+runbook over SSH by hand every time (Clínica Valor's and PrimeConnect AI's
+first onboardings both were) — slow, and every manual step is a place to
+typo a hostname or forget a flag. `POST /api/new-client` (and its streaming
+sibling below) automates everything mechanical: clone, pick a free port,
+template the override file / starter `site_config.yaml` / a bootable
+placeholder `.env`, first build/boot, swap the real starter config into
+`/data`, wire the new hostname into the shared Caddy, and register it in
+`clients.json`. It deliberately leaves the one genuinely judgment-requiring
+step — which real secrets go in `.env`, and where they come from — to the
+Credentials tool above, rather than guessing at it.
+
+**Crash-hardened**: an earlier version of this route had no top-level
+exception handling, so any unhandled error (a `PermissionError` on a
+half-provisioned `/data` volume was the one that actually happened) just
+500'd with no usable detail. It now always returns `{"ok": false, "phase":
+"crash", ...}` instead of raising, same defensive posture as every other
+mutating route in this codebase.
+
+**Streaming console**: a `docker compose build` here genuinely takes
+minutes, and staring at a blank spinner that whole time was the direct
+complaint that led to `POST /api/new-client/stream` — an
+`application/x-ndjson` response, one JSON object per line
+(`{"type": "phase"/"log"/"result", ...}`), consumed frontend-side via
+`resp.body.getReader()` (not `EventSource`, which only supports GET). The
+New Client modal's console renders these live as they arrive, the same
+give-me-real-progress reasoning as the Version/Deploy sections above. The
+non-streaming route stays as a thin wrapper that drains the same generator
+and returns only the final result — written this way (one real
+implementation, one wrapper) specifically so the two paths can never drift
+apart.
+
+### Compose project-name pinning — the incident that made every `docker compose` call `-p`-scoped
+
+A live New Client wizard run once took **a different, already-running
+client** down. Root cause: `docker compose` infers its project name from
+the current directory when none is given explicitly — but every SSH
+command this tool builds runs as a single non-interactive command string
+with no `cd` into `remote_dir` first (each SSH round trip is its own
+process; a `cd` in one command doesn't persist to the next). Two different
+clients' checkouts sitting under similarly-shaped directory names left
+enough ambiguity that a restart issued for one client's project ended up
+recreating/removing the *other* client's container on the same box.
+
+Fixed by scoping literally every `docker compose` invocation in this
+codebase with an explicit `-p <project>` — never relying on inferred
+context. `core._project_name(remote_dir)` derives the project name the
+same simple way every client's own directory is already named
+(`remote_dir.rstrip("/").rsplit("/", 1)[-1]`), and it's now threaded
+through `check_version`, `deploy_client`, `restart_container`,
+`check_client_resources`, and the New Client wizard's own combined
+clone/build/up/swap command. Verified with a dedicated test that extracts
+the actual SSH command each function builds and asserts `-p <project>` is
+in it, rather than just trusting the parsed result.
+
+**The actual lesson, for any future code here that invokes `docker
+compose` over SSH**: never assume the remote shell's inferred project name
+is the one you mean. Pass `-p` explicitly, always, even when it looks
+redundant — "it worked in testing" doesn't rule out a second client's
+checkout existing on the same box in production, which is exactly the gap
+that caused this.
+
 ## Copying credentials between deploys (.env manager)
 
 The **Credentials** button in the header opens a tool for exactly the thing
@@ -449,6 +513,46 @@ a working set of API keys from an existing deploy into a brand-new one.
 - Content is written to the remote `.env` via base64 over the SSH command,
   not spliced in as raw text — a key containing a `$`, backtick, or quote
   can't be misread as a shell command on the way in.
+
+**Round-robin keys are one env var with commas, not two env vars.**
+`MISTRAL_API_KEY`/`NVIDIA_API_KEY` can each hold several comma-separated
+keys in a single line (`key1, key2`) for the app's own internal rotation —
+this is deliberate app-level semantics, not something `env_tool.py`'s
+`parse_env()` should ever split on. Two real bugs came from getting this
+wrong: `test_mistral` didn't strip to the first key before testing (fixed
+to match `test_nvidia`'s existing `key.split(",")[0].strip()`), and an
+earlier version of this UI had invented fake `MISTRAL_API_KEY2`/
+`NVIDIA_API_KEY2` rows based on a wrong assumption that rotation meant two
+separate env vars — removed from `KNOWN_ENV_KEYS`/`CRED_TEST_KIND` in
+`app.js`. If a client's own values are ever "our test keys" shared across
+every deploy as alternates (confirmed as the intended pattern, not a
+one-off), the comma-joined single-line form above is the correct way to
+enter them here — not a second row.
+
+## Voice calls on a client
+
+Covered in full in `docs/VOICE_NETWORKING.md` (and as a runnable
+`enable-client-voice` Claude Code skill under `.claude/skills/`) — the
+short version, since it cost real time to work out and is worth knowing
+before it comes up again: a client's voice call can fail in three
+different, easy-to-conflate ways — (1) it "rings but never answers"
+because plain bridge-mode Docker networking has no path for WebRTC's real
+audio (UDP, negotiated separately from the HTTPS signaling) to reach the
+container — fixed by every satellite client now running `network_mode:
+host` with its own pinned port, same as `_generate_override_yaml()`
+generates for every new client automatically; (2) the container
+crash-loops on boot with `RuntimeError: Refusing to start in production
+with voice.enabled and a non-EU voice provider` whenever a client's `.env`
+has `ENV=prod` and `tts.provider` isn't EU-owned (Google TTS is the only
+TTS actually wired up in the product today, and it isn't EU-owned) — a
+real compliance guard, not a bug, and bypassing it (`ENV=dev`) is a
+business decision to make per client, never a default; (3) a
+`PermissionError` writing `/data/site_config.yaml` from ownership drift on
+the volume, fixed with `chown -R appuser:appuser /data` as root inside the
+container. New clients from the wizard ship with a full, ready-to-enable
+`voice:` block and voice-capable networking by default — turning it on for
+any client (new or old) is the skill's job, not a from-scratch
+investigation.
 
 ## Known gaps (not built yet)
 
