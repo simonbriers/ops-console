@@ -1,0 +1,35 @@
+# Local dev/iteration run — port-mapped (works on Docker Desktop, unlike
+# network_mode: host), same split as dental-clinic-agent's own
+# docker-compose.local.yml vs docker-compose.yml.
+name: ops-console-local
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ops-console:local
+    container_name: ops-console-local
+    restart: unless-stopped
+    ports:
+      - "8100:8000"
+    volumes:
+      - app_data_local:/data
+      # SSH key + known_hosts, read-only — needed ONLY for the version
+      # check (git/docker-compose-ps over SSH to each client's VPS). Every
+      # other check (health, usage) is plain HTTPS and needs no key at all.
+      # Mounted to .ssh-src (NOT .ssh directly) — entrypoint.sh copies it
+      # into a container-owned ~/.ssh with correct permissions at startup,
+      # since a raw bind-mount from Windows carries ACLs OpenSSH's client
+      # will refuse to use. Uncomment once you're ready to enable it; leave
+      # commented to run with version-checks disabled/erroring gracefully.
+      - ${USERPROFILE}/.ssh:/home/appuser/.ssh-src:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  app_data_local:

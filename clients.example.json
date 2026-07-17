@@ -1,0 +1,36 @@
+{
+  "poll_interval_seconds": 60,
+  "clients": [
+    {
+      "name": "Main Clinic (chat.briers.eu)",
+      "base_url": "https://chat.briers.eu",
+      "ssh_target": "deploy@chat.briers.eu",
+      "remote_dir": "~/dental-clinic-agent",
+      "monthly_token_quota": 2000000,
+      "admin_token": "REPLACE_ME_OR_USE_FETCH_VIA_SSH",
+      "minutes_per_booking": 6,
+      "minutes_per_reschedule": 4,
+      "minutes_per_cancellation": 3,
+      "minutes_per_callback": 5,
+      "cost_per_1k_input_tokens": 0,
+      "cost_per_1k_cached_tokens": 0,
+      "cost_per_1k_output_tokens": 0
+    },
+    {
+      "name": "Clinica Valor",
+      "base_url": "https://valor.my-ai-receptionist.com",
+      "ssh_target": "deploy@chat.briers.eu",
+      "remote_dir": "~/clinica-valor",
+      "monthly_token_quota": 500000,
+      "admin_token": "REPLACE_ME_OR_USE_FETCH_VIA_SSH"
+    }
+  ],
+  "hosts": [
+    {
+      "name": "Hetzner VPS",
+      "ssh_target": "deploy@chat.briers.eu",
+      "caddyfile_path": "~/dental-clinic-agent/deploy/Caddyfile",
+      "env_path": "~/dental-clinic-agent/.env"
+    }
+  ]
+}

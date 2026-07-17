@@ -1,0 +1,29 @@
+# Persistent run (still local-only for now — see README "Explicitly
+# deferred": no public/VPS deployment of this dashboard yet).
+name: ops-console
+
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ops-console:latest
+    container_name: ops-console
+    restart: unless-stopped
+    ports:
+      - "8100:8000"
+    volumes:
+      - app_data:/data
+      # See docker-compose.local.yml's comment — uncomment to enable the
+      # SSH-based version check (mounted to .ssh-src; entrypoint.sh copies
+      # it into a container-owned ~/.ssh with correct permissions).
+      # - ${USERPROFILE}/.ssh:/home/appuser/.ssh-src:ro
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  app_data:

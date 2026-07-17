@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ops-console</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="/static/style.css" />
+</head>
+<body>
+  <header>
+    <h1>ops-console</h1>
+    <div class="header-actions">
+      <span id="statusBar" class="status-bar">Loading…</span>
+      <button id="refreshBtn">Refresh now</button>
+      <button id="newClientBtn" class="primary">New client</button>
+      <button id="credsBtn">Credentials</button>
+      <button id="settingsBtn">Settings</button>
+      <button id="addClientBtn">Add existing…</button>
+    </div>
+  </header>
+
+  <main>
+    <section id="infraPanel" class="infra-panel">
+      <div id="infraGauges" class="infra-gauges"></div>
+      <div class="infra-sites">
+        <h3>Sites on this VPS (from Caddyfile)</h3>
+        <table id="sitesTable">
+          <thead>
+            <tr><th>Hostname</th><th>Type</th><th>Target</th><th>Client</th></tr>
+          </thead>
+          <tbody id="sitesTableBody">
+            <tr><td colspan="4" class="empty">No hosts configured yet.</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div id="infraDiskBreakdown" class="infra-disk-breakdown"></div>
+    </section>
+
+    <section id="impactPanel" class="impact-panel">
+      <h3>This month, across every client</h3>
+      <div id="impactCards" class="impact-cards"></div>
+    </section>
+
+    <table id="clientTable">
+      <thead>
+        <tr>
+          <th></th>
+          <th>Name</th>
+          <th>Health</th>
+          <th>Version</th>
+          <th>Usage (month)</th>
+          <th>Uptime (7d)</th>
+          <th>Saved (mo)</th>
+          <th>Last checked</th>
+        </tr>
+      </thead>
+      <tbody id="clientTableBody">
+        <tr><td colspan="8" class="empty">No clients configured yet — click "Add client" to start monitoring one.</td></tr>
+      </tbody>
+    </table>
+  </main>
+
+  <!-- Detail modal -->
+  <div id="detailModal" class="modal hidden">
+    <div class="modal-box">
+      <button class="close" data-close="detailModal">&times;</button>
+      <h2 id="detailName"></h2>
+      <div id="detailStatus" class="status-pill"></div>
+
+      <section>
+        <h3>Health</h3>
+        <div id="detailHealth"></div>
+      </section>
+
+      <section>
+        <h3>Version / containers</h3>
+        <div id="detailVersion"></div>
+        <div id="deployArea" class="deploy-area"></div>
+      </section>
+
+      <section>
+        <h3>Usage this month</h3>
+        <div id="detailUsage"></div>
+        <div class="progress-track"><div id="detailQuotaBar" class="progress-fill"></div></div>
+      </section>
+
+      <section>
+        <h3>Resources</h3>
+        <div id="detailResources"></div>
+      </section>
+
+      <section>
+        <h3>Interactions this month</h3>
+        <div id="detailInteractions"></div>
+      </section>
+
+      <section>
+        <h3>Estimated cost</h3>
+        <div id="detailCost"></div>
+      </section>
+
+      <section>
+        <h3>Uptime &amp; latency (from ops-console's own history)</h3>
+        <div id="detailUptime"></div>
+      </section>
+
+      <div class="modal-actions">
+        <button id="detailRefreshBtn">Refresh now</button>
+        <button id="detailEditBtn">Edit</button>
+        <button id="detailDeleteBtn" class="danger">Remove</button>
+      </div>
+      <p id="detailChecked" class="muted"></p>
+    </div>
+  </div>
+
+  <!-- Add/Edit modal -->
+  <div id="editModal" class="modal hidden">
+    <div class="modal-box">
+      <button class="close" data-close="editModal">&times;</button>
+      <h2 id="editTitle">Add client</h2>
+      <form id="editForm">
+        <label>Name <input name="name" required /></label>
+        <label>Public base URL <input name="base_url" placeholder="https://chat.example.com" required /></label>
+        <label>SSH target <input name="ssh_target" placeholder="deploy@host" /></label>
+        <label>Remote compose dir <input name="remote_dir" placeholder="~/dental-clinic-agent" /></label>
+        <label>Monthly token quota <input name="monthly_token_quota" type="number" min="0" value="0" /></label>
+        <label>Admin token
+          <span class="token-row">
+            <input name="admin_token" type="password" />
+            <button type="button" id="fetchTokenBtn">Fetch via SSH</button>
+          </span>
+        </label>
+        <p id="fetchTokenStatus" class="muted"></p>
+
+        <details class="advanced-fields">
+          <summary>Advanced: "minutes saved" &amp; cost-estimate rates (optional)</summary>
+          <p class="muted">Leave blank to use sensible defaults (minutes) or hide the number entirely (cost — this tool can't know your real LLM pricing on its own).</p>
+          <div class="field-grid">
+            <label>Minutes per booking <input name="minutes_per_booking" type="number" min="0" placeholder="6" /></label>
+            <label>Minutes per reschedule <input name="minutes_per_reschedule" type="number" min="0" placeholder="4" /></label>
+            <label>Minutes per cancellation <input name="minutes_per_cancellation" type="number" min="0" placeholder="3" /></label>
+            <label>Minutes per callback <input name="minutes_per_callback" type="number" min="0" placeholder="5" /></label>
+            <label>$ per 1K input tokens <input name="cost_per_1k_input_tokens" type="number" min="0" step="0.0001" placeholder="0" /></label>
+            <label>$ per 1K cached tokens <input name="cost_per_1k_cached_tokens" type="number" min="0" step="0.0001" placeholder="0" /></label>
+            <label>$ per 1K output tokens <input name="cost_per_1k_output_tokens" type="number" min="0" step="0.0001" placeholder="0" /></label>
+          </div>
+        </details>
+
+        <div class="modal-actions">
+          <button type="submit" class="primary">Save</button>
+          <button type="button" data-close="editModal">Cancel</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- New client wizard modal -->
+  <div id="newClientModal" class="modal hidden">
+    <div class="modal-box wide">
+      <button class="close" data-close="newClientModal">&times;</button>
+      <h2>New client</h2>
+      <p class="muted">Clones the repo, picks a free port, generates a bootable placeholder <code>.env</code> + starter <code>site_config.yaml</code>, builds and boots it, wires it into the shared Caddy, and registers it here — all over SSH. You only need to know the deploy name and the hostname; everything else (real API keys, business content) you fill in afterward via Credentials and the admin panel.</p>
+
+      <form id="newClientForm">
+        <label>Deploy name <input name="deploy_name" placeholder="acme-dental" pattern="[a-z][a-z0-9-]*" required />
+          <span class="muted">lowercase, digits, hyphens only — becomes the directory/container/Compose-project name</span>
+        </label>
+        <label>Hostname <input name="hostname" placeholder="acme.my-ai-receptionist.com" required /></label>
+        <label>Display name <span class="muted">(optional — shown in this dashboard and as the placeholder business name; defaults to the deploy name)</span>
+          <input name="display_name" placeholder="Acme Dental" />
+        </label>
+        <label>Clone from / same VPS as
+          <select name="template_client_name" id="newClientTemplateSelect" required></select>
+          <span class="muted">reuses this client's git origin and SSH target — nothing from its .env is copied</span>
+        </label>
+
+        <div class="modal-actions">
+          <button type="submit" class="primary">Provision</button>
+          <button type="button" data-close="newClientModal">Cancel</button>
+        </div>
+      </form>
+
+      <pre id="newClientConsole" class="newclient-console">Console output will appear here once you click Provision — this streams live over SSH as the clone/build/boot/Caddy steps actually happen.</pre>
+      <div id="newClientResult"></div>
+    </div>
+  </div>
+
+  <!-- Credentials modal -->
+  <div id="credsModal" class="modal hidden">
+    <div class="modal-box wide">
+      <button class="close" data-close="credsModal">&times;</button>
+      <h2>Copy credentials between deploys</h2>
+      <p class="muted">Reads/writes a client's <code>.env</code> directly over SSH — no more hand copy-pasting through vim. Pick clients you've already added, or type an SSH target + remote dir for one not yet in the list (e.g. a brand-new deploy). The destination's existing <code>.env</code>, if any, is backed up on the server before being overwritten.</p>
+
+      <div class="creds-columns">
+        <div class="creds-column">
+          <h3>Source (copy from)</h3>
+          <label>Client <select id="credsSourceSelect"></select></label>
+          <div id="credsSourceCustom" class="creds-custom">
+            <label>SSH target <input id="credsSourceSsh" placeholder="deploy@host" /></label>
+            <label>Remote dir <input id="credsSourceDir" placeholder="~/dental-clinic-agent" /></label>
+          </div>
+          <button type="button" id="credsLoadSourceBtn">Load .env</button>
+          <p id="credsSourceStatus" class="muted"></p>
+        </div>
+        <div class="creds-column">
+          <h3>Destination (write to)</h3>
+          <label>Client <select id="credsDestSelect"></select></label>
+          <div id="credsDestCustom" class="creds-custom">
+            <label>SSH target <input id="credsDestSsh" placeholder="deploy@host" /></label>
+            <label>Remote dir <input id="credsDestDir" placeholder="~/primeconnect-ai" /></label>
+            <label>Base URL <span class="muted">(optional — only needed to test the Admin token below)</span> <input id="credsDestBaseUrl" placeholder="https://newclient.example.com" /></label>
+          </div>
+          <button type="button" id="credsLoadDestBtn">Load existing .env (optional)</button>
+          <p id="credsDestStatus" class="muted"></p>
+        </div>
+      </div>
+
+      <table class="creds-table">
+        <thead>
+          <tr><th>Key</th><th>Source value</th><th></th><th>Destination value</th><th>Test</th></tr>
+        </thead>
+        <tbody id="credsTableBody">
+          <tr><td colspan="5" class="empty">Load a source .env, or click "+ Add key", to begin.</td></tr>
+        </tbody>
+      </table>
+      <button type="button" id="credsAddRowBtn">+ Add key</button>
+
+      <div class="modal-actions">
+        <label class="creds-restart-label"><input type="checkbox" id="credsRestartAfter" /> Restart container after writing (needed for new values to take effect)</label>
+      </div>
+      <div class="modal-actions">
+        <button type="button" id="credsWriteBtn" class="primary">Write .env to destination</button>
+        <span id="credsWriteStatus" class="muted"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings modal -->
+  <div id="settingsModal" class="modal hidden">
+    <div class="modal-box">
+      <button class="close" data-close="settingsModal">&times;</button>
+      <h2>Settings</h2>
+      <label>Poll interval (seconds) <input id="pollIntervalInput" type="number" min="15" max="3600" /></label>
+      <div class="modal-actions">
+        <button id="saveSettingsBtn" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
