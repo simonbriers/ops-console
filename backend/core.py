@@ -46,6 +46,24 @@ SSH_TIMEOUT = 20
 DEPLOY_TIMEOUT = 300  # a docker compose build can genuinely take minutes
 MAX_PARALLEL_CHECKS = 8
 
+# The literal placeholder shipped in clients.example.json. If a client still
+# has this value (never replaced with a real token, e.g. right after a fresh
+# `copy clients.example.json clients.json`), treat it exactly like "no token
+# configured" rather than sending it as a real X-Admin-Token on every poll.
+# Sending it for real trips the monitored instance's OWN brute-force lockout
+# (backend/security.py + admin.py's require_admin on that product — 3 bad
+# attempts locks the polling machine's source IP out for 15 minutes) on a
+# fixed ~poll_interval_seconds cadence, which is exactly the kind of
+# self-inflicted incident this guard exists to prevent — see the real one
+# that happened onboarding Main Clinic + Clinica Valor locally.
+PLACEHOLDER_ADMIN_TOKEN = "REPLACE_ME_OR_USE_FETCH_VIA_SSH"
+
+
+def _real_token(client: dict[str, Any]) -> str:
+    """The client's admin_token, or "" if unset/still the shipped placeholder."""
+    token = client.get("admin_token") or ""
+    return "" if token == PLACEHOLDER_ADMIN_TOKEN else token
+
 # Rough, editable-per-client assumptions for how many minutes a human
 # receptionist would spend on each task type, used only to turn audit-log
 # counts into a "time saved" estimate for the invoicing/sales narrative —
@@ -881,13 +899,16 @@ def check_usage(client: dict[str, Any], start: str | None = None, end: str | Non
     the monitored instance's side; this just consumes it. Defaults to
     month-to-date."""
     base = (client.get("base_url") or "").rstrip("/")
-    token = client.get("admin_token") or ""
+    token = _real_token(client)
     empty = {"ok": False, "error": None, "chats": 0, "input_tokens": 0,
              "cached_tokens": 0, "output_tokens": 0, "total_tokens": 0}
     if not base:
         return {**empty, "error": "no base_url configured"}
     if not token:
-        return {**empty, "error": "no admin_token configured"}
+        reason = ("admin_token is still the example placeholder — fetch or set the real one"
+                   if client.get("admin_token") == PLACEHOLDER_ADMIN_TOKEN
+                   else "no admin_token configured")
+        return {**empty, "error": reason}
 
     if start is None or end is None:
         start, end = _month_bounds()
@@ -943,14 +964,17 @@ def check_interactions(client: dict[str, Any], start: str | None = None, end: st
     so "nothing happened this month" and "we couldn't read the log" never
     look the same."""
     base = (client.get("base_url") or "").rstrip("/")
-    token = client.get("admin_token") or ""
+    token = _real_token(client)
     empty = {"ok": False, "error": None, "bookings": 0, "reschedules": 0,
              "cancellations": 0, "callbacks": 0, "registrations": 0,
              "other": 0, "minutes_saved": 0}
     if not base:
         return {**empty, "error": "no base_url configured"}
     if not token:
-        return {**empty, "error": "no admin_token configured"}
+        reason = ("admin_token is still the example placeholder — fetch or set the real one"
+                   if client.get("admin_token") == PLACEHOLDER_ADMIN_TOKEN
+                   else "no admin_token configured")
+        return {**empty, "error": reason}
 
     if start is None or end is None:
         start, end = _month_bounds()

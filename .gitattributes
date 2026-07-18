@@ -1,0 +1,6 @@
+# Force LF line endings for shell scripts regardless of platform/checkout
+# settings (Windows' git core.autocrlf=true silently rewrites these to CRLF
+# on checkout, which breaks the Linux container's shebang line — see the
+# entrypoint.sh CRLF incident). Keep new shell scripts covered here too.
+*.sh text eol=lf
+entrypoint.sh text eol=lf

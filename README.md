@@ -72,11 +72,31 @@ ipv4 show excludedportrange protocol=tcp`.)
 
 ```powershell
 cd ops-console
-copy clients.example.json clients.json
 docker compose -f docker-compose.local.yml up --build
 ```
 
-Open http://127.0.0.1:8100.
+Open http://127.0.0.1:8100. It starts with **zero configured clients** —
+add them from the UI ("Add Client", then "Fetch admin token via SSH" once
+`ssh_target`/`remote_dir` are filled in). The Docker path's `clients.json`
+lives *inside* the `app_data_local` named volume, at `/data/clients.json`
+(see "Running in Docker vs. venv: two separate config stores" below) — a
+`copy clients.example.json clients.json` on the host does **not** reach
+it, so use the UI rather than that command for this path.
+
+**If you ever manually seed/overwrite the container's `/data/clients.json`
+from the host anyway** (e.g. `docker compose -f docker-compose.local.yml cp
+clients.json app:/data/clients.json`) — don't. `docker cp` always writes as
+root, but the app runs as the non-root `appuser`, so the very next save
+from the UI will fail with `PermissionError: [Errno 13] Permission denied:
+'/data/clients.json'`. If it's already happened, fix ownership with:
+```powershell
+docker compose -f docker-compose.local.yml exec -u root app chown -R appuser:appuser /data
+```
+(This bit us for real once, hence the ownership fix in `backend/core.py`
+that additionally treats a still-placeholder `admin_token` as unset — see
+"What it checks, and how" — so a half-seeded config can't also trip the
+monitored instance's own brute-force lockout by polling it with the
+literal example token.)
 
 **SSH version-check in Docker**: uncomment the `.ssh-src` volume line in
 `docker-compose.local.yml` to let the container reach your VPS the same
