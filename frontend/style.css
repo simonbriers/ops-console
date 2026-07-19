@@ -199,3 +199,37 @@ form input { width: 100%; padding: 0.4rem 0.5rem; margin-top: 0.25rem; border: 1
 .newclient-result .newclient-output { margin-top: 0.5rem; font-size: 0.78rem; }
 .newclient-result .newclient-output summary { cursor: pointer; color: #444; }
 .newclient-result .newclient-output pre { background: #fff; border-radius: 6px; padding: 0.5rem 0.7rem; margin-top: 0.4rem; overflow-x: auto; white-space: pre-wrap; max-height: 250px; overflow-y: auto; }
+
+/* === Onboarding v2: tabs, stepper, vault, smoke === */
+.main-tabs { display: flex; gap: 4px; margin: 0 0 16px; border-bottom: 2px solid rgba(127,127,127,.25); }
+.main-tabs .tab { border: none; background: none; padding: 10px 18px; cursor: pointer;
+  font-size: 15px; font-weight: 600; opacity: .65; border-bottom: 2px solid transparent; margin-bottom: -2px; }
+.main-tabs .tab.active { opacity: 1; border-bottom-color: #16b9a8; }
+.page.hidden { display: none; }
+.ob-panel { margin-bottom: 22px; }
+.ob-form { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: end; }
+.ob-form label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.ob-card { padding: 10px 12px; border: 1px solid rgba(127,127,127,.3); border-radius: 8px;
+  margin-bottom: 8px; cursor: pointer; }
+.ob-card:hover { border-color: #16b9a8; }
+.ob-chiprow { margin-top: 6px; display: flex; gap: 4px; flex-wrap: wrap; }
+.ob-chip { font-size: 11px; padding: 2px 8px; border-radius: 99px; background: rgba(127,127,127,.15); }
+.ob-chip.ob-ok { background: rgba(22,185,168,.25); }
+.ob-chip.ob-failed { background: rgba(220,80,80,.3); }
+.ob-chip.ob-running { background: rgba(240,180,60,.3); }
+.ob-step { display: flex; align-items: center; gap: 12px; padding: 10px 8px;
+  border-bottom: 1px solid rgba(127,127,127,.15); }
+.ob-step-num { width: 26px; height: 26px; border-radius: 50%; background: rgba(127,127,127,.2);
+  display: inline-flex; align-items: center; justify-content: center; font-weight: 700; flex: none; }
+.ob-step.ob-ok .ob-step-num { background: #16b9a8; color: #fff; }
+.ob-step.ob-failed .ob-step-num { background: #d05050; color: #fff; }
+.ob-step-body { flex: 1; display: flex; flex-direction: column; }
+.ob-step-status { font-size: 12px; opacity: .7; width: 60px; }
+.ob-set { display: block; margin: 3px 0; }
+.smoke-row { padding: 3px 0; font-size: 13px; }
+.smoke-ok { color: #12907f; }
+.smoke-fail { color: #c04545; }
+.smoke-warn { color: #b08020; }
+#obConsole { max-height: 320px; overflow: auto; }
+.host-compose { display: inline-flex; align-items: center; gap: 2px; }
+.host-suffix { opacity: .7; font-size: 13px; white-space: nowrap; }

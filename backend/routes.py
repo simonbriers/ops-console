@@ -19,6 +19,10 @@ from backend import deploy_log
 from backend import env_tool
 from backend import history
 from backend import new_client as new_client_mod
+from backend import onboarding as onboarding_mod
+from backend import smoke as smoke_mod
+from backend import validator as validator_mod
+from backend import vault as vault_mod
 
 router = APIRouter(prefix="/api")
 
@@ -363,6 +367,9 @@ def _run_new_client(
         # Already known — the wizard generated this same value into the
         # instance's .env moments ago, no need to fetch it back over SSH.
         "admin_token": provision.get("admin_password") or "",
+        # Loopback port: lets the smoke suite and (if ADMIN_TUNNEL_ONLY is
+        # ever enabled for this client) SSH-based metrics work immediately.
+        "admin_local_port": provision.get("port"),
     })
     cfg.save_clients(clients)
 
@@ -509,3 +516,401 @@ def update_settings(body: SettingsIn) -> dict[str, Any]:
         raise HTTPException(status_code=422, detail="poll_interval_seconds must be between 15 and 3600")
     cfg.save_poll_interval(body.poll_interval_seconds)
     return {"poll_interval_seconds": body.poll_interval_seconds}
+
+
+# ---------------------------------------------------------------------------
+# Onboarding v2 (docs/ONBOARDING_V2_PLAN.md): the stepper API, teardown,
+# smoke suite, config validation, and the credentials vault. Appended as one
+# block; every streaming endpoint speaks the same NDJSON dialect as
+# /new-client/stream ({"type": "log"|"result", ...}).
+# ---------------------------------------------------------------------------
+import base64 as _b64
+
+from fastapi.responses import JSONResponse
+
+
+class OnboardingIn(BaseModel):
+    deploy_name: str
+    display_name: str = ""
+    hostname: str = ""
+    template_client_name: str = ""
+    notes: str = ""
+
+
+class StepRunIn(BaseModel):
+    set_ids: list[str] = []          # used by the credentials step only
+
+
+class TeardownIn(BaseModel):
+    confirm: str                     # must equal the deploy_name, typed
+
+
+class VaultSetIn(BaseModel):
+    name: str
+    kind: str
+    values: dict[str, str] = {}
+    content_b64: str | None = None
+    id: str | None = None
+
+
+class VaultImportIn(BaseModel):
+    client_name: str
+
+
+class ApplyCredsIn(BaseModel):
+    set_ids: list[str]
+
+
+def _ndjson(gen):
+    def encode():
+        for event in gen:
+            yield json.dumps(event) + "\n"
+    return StreamingResponse(encode(), media_type="application/x-ndjson")
+
+
+def _onboarding_or_404(deploy_name: str) -> dict[str, Any]:
+    record = onboarding_mod.load(deploy_name)
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"No onboarding named {deploy_name!r}")
+    return record
+
+
+def _client_for_onboarding(record: dict[str, Any]) -> dict[str, Any] | None:
+    display = record.get("bundle", {}).get("display_name") or record.get("deploy_name")
+    return cfg.find_client(display)
+
+
+def _primary_remote_dir() -> str:
+    hosts = cfg.load_hosts()
+    caddyfile_path = hosts[0].get("caddyfile_path", "") if hosts else ""
+    return caddyfile_path.rsplit("/deploy/Caddyfile", 1)[0] if caddyfile_path else ""
+
+
+@router.get("/onboardings")
+def list_onboardings() -> list[dict[str, Any]]:
+    return [onboarding_mod.summary(r) for r in onboarding_mod.load_all()]
+
+
+@router.get("/onboardings/steps")
+def onboarding_steps() -> list[dict[str, str]]:
+    return onboarding_mod.STEPS
+
+
+@router.get("/onboardings/{deploy_name}")
+def get_onboarding(deploy_name: str) -> dict[str, Any]:
+    return _onboarding_or_404(deploy_name)
+
+
+@router.post("/onboardings", status_code=201)
+def upsert_onboarding(body: OnboardingIn) -> dict[str, Any]:
+    """Create (or update the intake of) an onboarding. Saving a complete
+    intake marks the intake step ok — this is the stepper's step 1."""
+    name_error = new_client_mod.validate_deploy_name(body.deploy_name)
+    if name_error:
+        raise HTTPException(status_code=400, detail=name_error)
+    hostname = ""
+    if body.hostname.strip():
+        hostname, host_error = onboarding_mod.normalize_hostname(body.hostname)
+        if host_error:
+            raise HTTPException(status_code=400, detail=host_error)
+    record = onboarding_mod.load(body.deploy_name)
+    bundle = {
+        "deploy_name": body.deploy_name,
+        "display_name": body.display_name.strip() or body.deploy_name,
+        "hostname": hostname,
+        "template_client_name": body.template_client_name.strip(),
+        "notes": body.notes,
+    }
+    if record is None:
+        record = onboarding_mod.new_record(bundle)
+        onboarding_mod.save(record)
+    else:
+        record["bundle"].update(bundle)
+        onboarding_mod.save(record)
+    complete = bool(bundle["hostname"] and bundle["template_client_name"])
+    onboarding_mod.set_step(body.deploy_name, "intake",
+                            "ok" if complete else "pending",
+                            "intake saved" if complete else "hostname/template still missing")
+    return onboarding_mod.load(body.deploy_name)
+
+
+@router.delete("/onboardings/{deploy_name}", status_code=204)
+def delete_onboarding(deploy_name: str) -> None:
+    """Removes only the RECORD (the paperwork). The instance, if provisioned,
+    stays — use /teardown to remove the instance itself."""
+    record = _onboarding_or_404(deploy_name)
+    onboarding_mod._path(record["deploy_name"]).unlink(missing_ok=True)
+
+
+@router.post("/onboardings/{deploy_name}/step/{step_id}/run")
+def run_onboarding_step(deploy_name: str, step_id: str, body: StepRunIn | None = None):
+    """Run (or RE-run — every step is safe to repeat) one step of an
+    onboarding, streaming progress and recording the outcome in the
+    persistent record, so an interrupted onboarding resumes exactly where
+    it left off."""
+    record = _onboarding_or_404(deploy_name)
+    if step_id not in onboarding_mod.STEP_IDS:
+        raise HTTPException(status_code=404, detail=f"unknown step {step_id!r}")
+    bundle = record.get("bundle", {})
+    set_ids = (body.set_ids if body else []) or []
+
+    def gen():
+        onboarding_mod.set_step(deploy_name, step_id, "running")
+        ok, detail = False, ""
+        try:
+            if step_id == "intake":
+                complete = bool(bundle.get("hostname") and bundle.get("template_client_name"))
+                ok, detail = complete, ("intake saved" if complete
+                                        else "fill hostname + template client first")
+                yield {"type": "log", "line": detail}
+
+            elif step_id == "dns":
+                template = cfg.find_client(bundle.get("template_client_name", ""))
+                ssh_target = (template or {}).get("ssh_target", "")
+                yield {"type": "log", "line": f"$ checking DNS for {bundle.get('hostname')} from the VPS…"}
+                res = core.check_dns(ssh_target, bundle.get("hostname", ""))
+                ok = res["ok"]
+                detail = (f"resolves to {res['expected']}" if ok else (res["error"] or "DNS check failed"))
+                yield {"type": "log", "line": f"expected {res.get('expected')}, resolved {res.get('resolved')}"}
+
+            elif step_id == "provision":
+                template = cfg.find_client(bundle.get("template_client_name", ""))
+                if template is None:
+                    detail = f"template client {bundle.get('template_client_name')!r} not found"
+                else:
+                    ssh_target = template.get("ssh_target", "")
+                    tdir = template.get("remote_dir", "")
+                    display = bundle.get("display_name") or deploy_name
+                    provision_result = None
+                    for ev in new_client_mod.create_new_client_stream(
+                            ssh_target, deploy_name, bundle.get("hostname", ""), display, tdir):
+                        if ev.get("type") == "result":
+                            provision_result = ev
+                        else:
+                            yield ev
+                    if not provision_result or not provision_result.get("ok"):
+                        detail = (provision_result or {}).get("error") or "provisioning failed"
+                    else:
+                        onboarding_mod.merge_result(
+                            deploy_name, port=provision_result.get("port"),
+                            remote_dir=provision_result.get("remote_dir"),
+                            admin_password=provision_result.get("admin_password"))
+                        primary = _primary_remote_dir()
+                        if not primary:
+                            detail = ("instance is up, but no host/caddyfile_path configured "
+                                      "in Settings to wire Caddy — fix Settings, re-run this step")
+                        else:
+                            caddy_result = None
+                            for ev in new_client_mod.wire_caddy_stream(
+                                    ssh_target, primary, bundle.get("hostname", ""),
+                                    provision_result["port"], deploy_name):
+                                if ev.get("type") == "result":
+                                    caddy_result = ev
+                                else:
+                                    yield ev
+                            if not caddy_result or not caddy_result.get("ok"):
+                                detail = f"Caddy wiring failed: {(caddy_result or {}).get('error')}"
+                            else:
+                                clients = cfg.load_clients()
+                                if not any(c.get("name") == display for c in clients):
+                                    clients.append({
+                                        "name": display,
+                                        "base_url": f"https://{bundle.get('hostname')}",
+                                        "ssh_target": ssh_target,
+                                        "remote_dir": provision_result["remote_dir"],
+                                        "monthly_token_quota": 0,
+                                        "admin_token": provision_result.get("admin_password") or "",
+                                        "admin_local_port": provision_result.get("port"),
+                                    })
+                                    cfg.save_clients(clients)
+                                    yield {"type": "log", "line": f"registered {display!r} in clients.json"}
+                                ok, detail = True, f"live at 127.0.0.1:{provision_result['port']}, Caddy wired"
+
+            elif step_id == "credentials":
+                client = _client_for_onboarding(record)
+                if client is None:
+                    detail = "client not registered yet — run the provision step first"
+                elif not set_ids:
+                    detail = "no vault sets chosen — pick at least one credential set"
+                else:
+                    yield {"type": "log", "line": f"$ applying {len(set_ids)} vault set(s) + recreate…"}
+                    res = vault_mod.apply_sets(client, set_ids)
+                    for t in res.get("tests", []):
+                        yield {"type": "log",
+                               "line": f"test {t.get('kind')}: {'ok' if t.get('ok') else t.get('error')}"}
+                    ok = res["ok"] and all(t.get("ok") for t in res.get("tests", []))
+                    detail = (f"applied {', '.join(res.get('applied', []))}; container recreated"
+                              if ok else (res.get("error") or "a credential test failed — see log"))
+
+            elif step_id == "config":
+                client = _client_for_onboarding(record)
+                if client is None:
+                    detail = "client not registered yet — run the provision step first"
+                else:
+                    shell = core._shell_remote_dir((client.get("remote_dir") or "").rstrip("/"))
+                    proj = core._project_name(client.get("remote_dir") or "")
+                    okc, out = core.run_ssh(
+                        client.get("ssh_target", ""),
+                        f"cd {shell} && docker compose -p {proj} exec -T app cat /data/site_config.yaml",
+                        timeout=40)
+                    if not okc:
+                        detail = f"couldn't read live config: {out.strip()[-200:]}"
+                    else:
+                        res = validator_mod.validate_yaml_text(out)
+                        for e in res.get("errors", []):
+                            yield {"type": "log", "line": f"ERROR: {e}"}
+                        for w in res.get("warnings", []):
+                            yield {"type": "log", "line": f"warning: {w}"}
+                        ok = res["ok"]
+                        detail = ("config valid"
+                                  + (f" ({len(res.get('warnings', []))} warning(s))" if res.get("warnings") else "")
+                                  if ok else f"{len(res.get('errors', []))} validation error(s)")
+
+            elif step_id == "verify":
+                client = _client_for_onboarding(record)
+                if client is None:
+                    detail = "client not registered yet — run the provision step first"
+                else:
+                    yield {"type": "log", "line": "$ running smoke suite…"}
+                    rows = smoke_mod.run_smoke(client)
+                    for r in rows:
+                        yield {"type": "log",
+                               "line": f"{'PASS' if r['ok'] else 'FAIL'} {r['check']}: {r['detail']}"}
+                    primary = _primary_remote_dir()
+                    caddy_gate = {"ok": False, "detail": "no primary checkout configured"}
+                    if primary:
+                        caddy_gate = new_client_mod.caddyfile_git_status(
+                            client.get("ssh_target", ""), primary)
+                    yield {"type": "log", "line": f"Caddyfile git status: {caddy_gate.get('detail')}"}
+                    critical = [r for r in rows if r["check"] != "backup_timer"]
+                    warn_rows = [r for r in rows if r["check"] == "backup_timer" and not r["ok"]]
+                    caddy_ok = bool(caddy_gate.get("clean")) and bool(caddy_gate.get("pushed"))
+                    ok = all(r["ok"] for r in critical) and caddy_ok
+                    parts = []
+                    if not all(r["ok"] for r in critical):
+                        parts.append(f"{sum(1 for r in critical if not r['ok'])} smoke check(s) failing")
+                    if not caddy_ok:
+                        parts.append(f"Caddyfile: {caddy_gate.get('detail')}")
+                    if warn_rows:
+                        parts.append("backup timer not active (warning)")
+                    detail = "all green" if ok and not warn_rows else ("; ".join(parts) or "all green")
+        except Exception as exc:  # noqa: BLE001 — a step crash must land in the record, not a 500
+            ok, detail = False, f"unexpected error ({type(exc).__name__}): {exc}"
+            yield {"type": "log", "line": detail}
+        onboarding_mod.set_step(deploy_name, step_id, "ok" if ok else "failed", detail)
+        yield {"type": "result", "ok": ok, "error": None if ok else detail, "step": step_id,
+               "record": onboarding_mod.summary(onboarding_mod.load(deploy_name) or record)}
+
+    return _ndjson(gen())
+
+
+@router.post("/onboardings/{deploy_name}/teardown")
+def teardown_onboarding(deploy_name: str, body: TeardownIn):
+    """Removes the INSTANCE (containers, volumes, checkout, Caddy block) and
+    its clients.json entry; the onboarding record stays, marked torn down,
+    so the paper trail survives. Requires the deploy name typed back as
+    confirmation — the same guard the Deploy button uses."""
+    record = _onboarding_or_404(deploy_name)
+    if body.confirm != deploy_name:
+        raise HTTPException(status_code=400, detail="confirmation text does not match the deploy name")
+    bundle = record.get("bundle", {})
+    template = cfg.find_client(bundle.get("template_client_name", ""))
+    ssh_target = ((template or {}).get("ssh_target")
+                  or (_client_for_onboarding(record) or {}).get("ssh_target") or "")
+    if not ssh_target:
+        raise HTTPException(status_code=400, detail="no ssh_target derivable for this onboarding")
+    primary = _primary_remote_dir()
+    protected = [c.get("remote_dir", "") for c in cfg.load_clients()
+                 if c.get("name") != (bundle.get("display_name") or deploy_name)]
+    if primary:
+        protected.append(primary)
+
+    def gen():
+        final = {"ok": False, "error": "teardown produced no result"}
+        for ev in new_client_mod.teardown_client_stream(
+                ssh_target, deploy_name, primary or "~/dental-clinic-agent",
+                bundle.get("hostname", ""), protected):
+            if ev.get("type") == "result":
+                final = ev
+            else:
+                yield ev
+        if final.get("ok"):
+            display = bundle.get("display_name") or deploy_name
+            clients = [c for c in cfg.load_clients() if c.get("name") != display]
+            cfg.save_clients(clients)
+            rec = onboarding_mod.load(deploy_name)
+            if rec:
+                rec["torn_down"] = True
+                for sid in onboarding_mod.STEP_IDS:
+                    if sid != "intake":
+                        rec["steps"][sid] = {"status": "pending", "detail": "reset by teardown",
+                                             "updated": rec["steps"].get(sid, {}).get("updated")}
+                onboarding_mod.save(rec)
+            yield {"type": "log", "line": f"removed {display!r} from clients.json; record kept (torn down)"}
+        yield {"type": "result", "ok": final.get("ok", False), "error": final.get("error")}
+
+    return _ndjson(gen())
+
+
+# --- smoke + validate on any client ----------------------------------------
+
+@router.post("/clients/{name}/smoke")
+def client_smoke(name: str) -> dict[str, Any]:
+    client = cfg.find_client(name)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+    rows = smoke_mod.run_smoke(client)
+    return {"ok": all(r["ok"] for r in rows if r["check"] != "backup_timer"), "checks": rows}
+
+
+@router.post("/clients/{name}/validate-config")
+def client_validate_config(name: str) -> dict[str, Any]:
+    client = cfg.find_client(name)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+    shell = core._shell_remote_dir((client.get("remote_dir") or "").rstrip("/"))
+    proj = core._project_name(client.get("remote_dir") or "")
+    ok, out = core.run_ssh(client.get("ssh_target", ""),
+                           f"cd {shell} && docker compose -p {proj} exec -T app cat /data/site_config.yaml",
+                           timeout=40)
+    if not ok:
+        return {"ok": False, "errors": [f"couldn't read live config: {out.strip()[-300:]}"], "warnings": []}
+    return validator_mod.validate_yaml_text(out)
+
+
+# --- credentials vault ------------------------------------------------------
+
+@router.get("/vault/sets")
+def vault_list() -> list[dict[str, Any]]:
+    return vault_mod.list_sets(redact=True)
+
+
+@router.post("/vault/sets")
+def vault_upsert(body: VaultSetIn) -> dict[str, Any]:
+    res = vault_mod.upsert_set(body.name, body.kind, body.values, body.content_b64, body.id)
+    if not res["ok"]:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+@router.delete("/vault/sets/{set_id}", status_code=204)
+def vault_delete(set_id: str) -> None:
+    res = vault_mod.delete_set(set_id)
+    if not res["ok"]:
+        raise HTTPException(status_code=404, detail=res["error"])
+
+
+@router.post("/vault/import")
+def vault_import(body: VaultImportIn) -> dict[str, Any]:
+    client = cfg.find_client(body.client_name)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"No client named {body.client_name!r}")
+    return vault_mod.import_from_client(client)
+
+
+@router.post("/clients/{name}/apply-credentials")
+def client_apply_credentials(name: str, body: ApplyCredsIn) -> dict[str, Any]:
+    client = cfg.find_client(name)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+    return vault_mod.apply_sets(client, body.set_ids)

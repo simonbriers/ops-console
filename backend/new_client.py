@@ -72,15 +72,32 @@ def next_free_port(ssh_target: str) -> dict[str, Any]:
     client on the box regardless of which era it was provisioned in, without
     needing to touch already-live older checkouts."""
     cmd = (
-        r"grep -rhoE '(127\.0\.0\.1:[0-9]+:8000|opsconsole_assigned_port: *[0-9]+)' "
-        r"$HOME/*/docker-compose.override.yml 2>/dev/null || true"
+        # Two sources, unioned: (a) sibling override files (both the old
+        # loopback-publish pattern and the newer assigned-port marker), and
+        # (b) what is ACTUALLY LISTENING on 8xxx right now (ss) — added
+        # 2026-07-19 after a hand-crafted override matched neither file
+        # pattern and the scan handed out PrimeConnect AI's live port 8002
+        # to a new client. The kernel cannot be fooled by file formats.
+        r"{ grep -rhoE '(127\.0\.0\.1:[0-9]+:8000|opsconsole_assigned_port: *[0-9]+)' "
+        r"$HOME/*/docker-compose.override.yml 2>/dev/null; "
+        r"ss -tln 2>/dev/null | grep -oE '[:.](8[0-9]{3}) ' ; } || true"
     )
     ok, output = run_ssh(ssh_target, cmd)
     if not ok:
         return {"ok": False, "error": output.strip()[-300:] or "ssh failed", "port": None}
     ports = [int(m) for m in re.findall(r":(\d+):8000", output)]
     ports += [int(m) for m in re.findall(r"opsconsole_assigned_port: *(\d+)", output)]
-    return {"ok": True, "error": None, "port": (max(ports) + 1) if ports else 8001}
+    # live listeners from the ss half of the command (":8002 " / ".8002 ")
+    ports += [int(m) for m in re.findall(r"[:.](8\d{3}) ", output)]
+    # First FREE port in the chatbot range (8001-8099; 8000 is always the
+    # primary, 8100+ belongs to other things on the box, e.g. the marketing
+    # site). "max+1" would let one unrelated high listener (ss now sees
+    # everything) push allocations out of the range for no reason.
+    used = set(ports)
+    free = next((p for p in range(8001, 8100) if p not in used), None)
+    if free is None:
+        return {"ok": False, "error": "no free port left in 8001-8099", "port": None}
+    return {"ok": True, "error": None, "port": free}
 
 
 def get_repo_origin(ssh_target: str, template_remote_dir: str) -> dict[str, Any]:
@@ -340,15 +357,25 @@ def create_new_client_stream(
     shell_dir = _shell_remote_dir(remote_dir)
 
     yield {"type": "log", "line": f"$ checking whether {remote_dir} already exists on {ssh_target}…"}
-    exists_ok, exists_output = run_ssh(ssh_target, f"[ -e {shell_dir} ] && echo EXISTS || echo MISSING")
+    exists_ok, exists_output = run_ssh(
+        ssh_target,
+        f"if [ -e {shell_dir} ]; then "
+        f"([ -f {shell_dir}/docker-compose.yml ] && [ -d {shell_dir}/.git ] "
+        f"&& echo RESUMABLE || echo FOREIGN); else echo MISSING; fi")
     if not exists_ok:
         yield _result(error=exists_output.strip()[-300:] or "ssh failed", stage="precheck")
         return
-    if "EXISTS" in exists_output:
-        yield _result(error=f"{remote_dir} already exists on the server — refusing to touch it. "
-                             "Remove it by hand first if you really want to start over.",
+    resume = "RESUMABLE" in exists_output
+    if "FOREIGN" in exists_output:
+        yield _result(error=f"{remote_dir} exists but is not a client checkout (no "
+                             "docker-compose.yml/.git) — refusing to touch it. Remove it by "
+                             "hand if you really want this name.",
                       stage="precheck")
         return
+    if resume:
+        yield {"type": "log", "line": f"  {remote_dir} is an existing client checkout — RESUMING: "
+                                       "clone will be skipped, the existing .env kept, and the DB "
+                                       "reseeded only if it never was."}
 
     yield {"type": "log", "line": "$ git remote get-url origin  (from the template client)"}
     origin_result = get_repo_origin(ssh_target, template_remote_dir)
@@ -389,12 +416,17 @@ def create_new_client_stream(
     # for the one-line copy from the primary's own (real) google_tts.json.
     cmd = (
         f"echo '{_MARK_CLONE}'; "
-        f"git clone {origin} {shell_dir} 2>&1; clone_status=$?; "
+        # Resume-safe: an existing valid checkout is pulled, not re-cloned.
+        f"if [ -d {shell_dir}/.git ]; then git -C {shell_dir} pull --ff-only 2>&1; clone_status=$?; "
+        f"else git clone {origin} {shell_dir} 2>&1; clone_status=$?; fi; "
         f"echo '{_MARK_FILES}'; "
         f"if [ $clone_status -eq 0 ]; then "
         f"printf '%s' '{override_b64}' | base64 -d > {override_file} && "
         f"printf '%s' '{site_config_b64}' | base64 -d > {shell_dir}/site_config.yaml && "
-        f"printf '%s' '{env_b64}' | base64 -d > {shell_dir}/.env && "
+        # Never clobber an existing .env on resume — it holds the REAL admin
+        # password/credentials; only a fresh checkout gets the placeholder.
+        f"([ -f {shell_dir}/.env ] && echo '(.env exists — kept)' || "
+        f"(printf '%s' '{env_b64}' | base64 -d > {shell_dir}/.env)) && "
         f"chmod 600 {shell_dir}/.env && touch {shell_dir}/google_tts.json 2>&1; files_status=$?; "
         f"else echo '(skipped — clone failed)'; files_status=1; fi; "
         f"echo '{_MARK_BUILD}'; "
@@ -409,7 +441,11 @@ def create_new_client_stream(
         f"if [ $up_status -eq 0 ]; then "
         f"sleep 3 && "
         f"docker cp {shell_dir}/site_config.yaml {deploy_name}:/data/site_config.yaml 2>&1 && "
-        f"docker compose -p {deploy_name} -f {compose_file} -f {override_file} exec -T app python -m backend.db.seed --reset 2>&1 && "
+        # Seed-once marker: --reset wipes the DB, fine on a fresh instance,
+        # destructive on a resumed one that may already hold real data.
+        f"docker compose -p {deploy_name} -f {compose_file} -f {override_file} exec -T app "
+        f"sh -c 'if [ -f /data/.opsconsole_seeded ]; then echo \"(already seeded — skipping reset)\"; "
+        f"else python -m backend.db.seed --reset && touch /data/.opsconsole_seeded; fi' 2>&1 && "
         f"docker compose -p {deploy_name} -f {compose_file} -f {override_file} restart app 2>&1; swap_status=$?; "
         f"else echo '(skipped — up failed)'; swap_status=1; fi; "
         f"echo '{_MARK_STATUS}'; "
@@ -459,6 +495,15 @@ def create_new_client_stream(
             yield {"type": "result", **base_result, "ok": False,
                    "error": f"'{stage}' step failed (see output) — nothing after it ran", "stage": stage}
             return
+
+    if resume:
+        # The generated placeholder password was NOT written (existing .env
+        # kept) — surface the real one so the result stays truthful.
+        pw_ok, pw_out = run_ssh(ssh_target,
+                                f"grep '^ADMIN_PASSWORD=' {shell_dir}/.env | head -1 | cut -d= -f2-")
+        if pw_ok and pw_out.strip():
+            base_result["admin_password"] = pw_out.strip()
+            base_result["backup_passphrase"] = "(kept from existing .env)"
 
     yield {"type": "result", **base_result, "ok": True, "error": None, "stage": "done"}
 
@@ -526,3 +571,110 @@ def wire_caddy(ssh_target: str, primary_remote_dir: str, hostname: str, port: in
         if event.get("type") == "result":
             result = {k: v for k, v in event.items() if k != "type"}
     return result
+
+
+# ---------------------------------------------------------------------------
+# Teardown + Caddy hygiene (Onboarding v2 — plan 1E / 1F)
+# ---------------------------------------------------------------------------
+
+def teardown_client_stream(ssh_target: str, deploy_name: str,
+                            primary_remote_dir: str, hostname: str,
+                            protected_dirs: list[str]):
+    """Tears a client instance back down, in reverse order of provisioning:
+    remove its Caddy site block (backup + validate-in-throwaway-container +
+    FORCE-RECREATE caddy — never a reload, the single-file bind mount keeps
+    the old inode otherwise, 2026-07-19 lesson), `docker compose down -v`
+    the instance (containers + named volumes), and delete the checkout
+    directory. clients.json/onboarding-record cleanup is the ROUTE's job
+    (local state, no SSH).
+
+    Refuses to touch the primary/template checkout or anything whose name
+    fails the same validation provisioning uses. Yields log lines, then one
+    {"type": "result"} — same contract as every other streamer here.
+    """
+    def _res(ok: bool, error: str | None = None):
+        return {"type": "result", "ok": ok, "error": error}
+
+    name_error = validate_deploy_name(deploy_name)
+    if name_error:
+        yield _res(False, name_error)
+        return
+    protected = {(d or "").rstrip("/").rsplit("/", 1)[-1] for d in protected_dirs}
+    if deploy_name in protected:
+        yield _res(False, f"{deploy_name!r} is a protected checkout (primary/template) — refusing.")
+        return
+
+    remote_dir = f"~/{deploy_name}"
+    shell_dir = _shell_remote_dir(remote_dir)
+    primary_shell = _shell_remote_dir(primary_remote_dir.rstrip("/"))
+
+    # 1. Caddy block removal (only if the hostname actually has a block).
+    if hostname and "/" not in hostname and " " not in hostname:
+        yield {"type": "log", "line": f"$ removing Caddy site block for {hostname} (if present)…"}
+        caddyfile = f"{primary_shell}/deploy/Caddyfile"
+        awk = (
+            "awk -v host='" + hostname + "' '"
+            "$0 == host \" {\" {skip=1; next} "
+            "skip && $0 == \"}\" {skip=0; next} "
+            "!skip' "
+        )
+        cmd = (
+            f"if grep -qF '{hostname} {{' {caddyfile}; then "
+            f"cp {caddyfile} {caddyfile}.bak.teardown-$(date +%Y%m%d%H%M%S) && "
+            f"{awk}{caddyfile} > {caddyfile}.tmp && mv {caddyfile}.tmp {caddyfile} && "
+            f"cd {primary_shell} && "
+            f"docker run --rm --env-file .env -v {primary_shell}/deploy/Caddyfile:/etc/caddy/Caddyfile:ro "
+            f"caddy:2-alpine caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 && "
+            f"docker compose up -d --force-recreate caddy 2>&1 && echo CADDY_REMOVED; "
+            f"else echo CADDY_ABSENT; fi"
+        )
+        holder: dict = {}
+        for line in stream_ssh(ssh_target, cmd, holder, timeout=DEPLOY_TIMEOUT):
+            yield {"type": "log", "line": line}
+        out = holder.get("output", "")
+        if "CADDY_REMOVED" not in out and "CADDY_ABSENT" not in out:
+            yield _res(False, "Caddy block removal did not confirm — the Caddyfile backup is on "
+                              "the server; fix by hand before retrying. Output: " + out.strip()[-400:])
+            return
+
+    # 2. Containers + volumes, then the directory.
+    yield {"type": "log", "line": f"$ docker compose -p {deploy_name} down -v …"}
+    holder = {}
+    cmd = (
+        f"docker compose -p {deploy_name} down -v --remove-orphans 2>&1; "
+        f"rm -rf {shell_dir} 2>&1 && echo DIR_REMOVED"
+    )
+    for line in stream_ssh(ssh_target, cmd, holder, timeout=DEPLOY_TIMEOUT):
+        yield {"type": "log", "line": line}
+    if "DIR_REMOVED" not in holder.get("output", ""):
+        yield _res(False, "compose down ran but the directory removal did not confirm: "
+                          + holder.get("output", "").strip()[-400:])
+        return
+    yield {"type": "log", "line": "teardown complete."}
+    yield _res(True)
+
+
+def caddyfile_git_status(ssh_target: str, primary_remote_dir: str) -> dict:
+    """The commit-back gate (plan 1F): after add_clinic_site.sh appends a
+    block on the VPS, is deploy/Caddyfile committed and pushed, or drifting
+    again? Returns {"ok", "clean", "pushed", "detail"} — clean means no
+    uncommitted diff; pushed means no local-only commits touching it."""
+    shell = _shell_remote_dir(primary_remote_dir.rstrip("/"))
+    cmd = (
+        f"cd {shell} && git fetch origin --quiet 2>/dev/null; "
+        f"echo DIRTY=$(git status --porcelain deploy/Caddyfile | wc -l); "
+        f"echo AHEAD=$(git log --oneline origin/master..HEAD -- deploy/Caddyfile 2>/dev/null | wc -l)"
+    )
+    ok, out = run_ssh(ssh_target, cmd, timeout=40)
+    if not ok:
+        return {"ok": False, "clean": False, "pushed": False,
+                "detail": out.strip()[-300:] or "ssh failed"}
+    import re as _re
+    dirty = _re.search(r"DIRTY=(\d+)", out)
+    ahead = _re.search(r"AHEAD=(\d+)", out)
+    clean = bool(dirty and dirty.group(1) == "0")
+    pushed = bool(ahead and ahead.group(1) == "0")
+    detail = ("committed and pushed" if clean and pushed else
+              "UNCOMMITTED changes on the VPS" if not clean else
+              "committed on the VPS but NOT pushed")
+    return {"ok": True, "clean": clean, "pushed": pushed, "detail": detail}

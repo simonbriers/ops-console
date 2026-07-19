@@ -1,5 +1,9 @@
-# Secrets — clients.json holds real admin tokens/SSH targets, never commit
+# Secrets — clients.json holds real admin tokens/SSH targets, vault.json
+# holds real credentials, onboardings/ holds per-client records incl.
+# generated admin passwords. Never commit any of them.
 clients.json
+vault.json
+onboardings/
 .env
 .env.*
 !.env.example

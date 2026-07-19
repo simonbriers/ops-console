@@ -1272,3 +1272,62 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# ---------------------------------------------------------------------------
+# Onboarding v2 additions (docs/ONBOARDING_V2_PLAN.md)
+# ---------------------------------------------------------------------------
+
+def vps_public_ip(ssh_target: str) -> dict[str, Any]:
+    """The VPS's own public IPv4, asked from the VPS itself (so NAT/proxies
+    on the operator's side can't skew it)."""
+    ok, out = run_ssh(ssh_target, "curl -4fsS --max-time 8 ifconfig.me 2>/dev/null || hostname -I")
+    ip = (out or "").strip().split()[0] if out and out.strip() else ""
+    if not ok or not ip:
+        return {"ok": False, "error": out.strip()[-200:] or "ssh failed", "ip": None}
+    return {"ok": True, "error": None, "ip": ip}
+
+
+def check_dns(ssh_target: str, hostname: str) -> dict[str, Any]:
+    """DNS precheck (plan 1A): does <hostname> resolve — as seen FROM the
+    VPS, which is whose resolver Let's Encrypt effectively needs to agree
+    with — to the VPS's own public IP? Gate Caddy wiring on this instead of
+    letting cert issuance fail in ways that read like script bugs."""
+    if not hostname or "/" in hostname or " " in hostname:
+        return {"ok": False, "error": f"invalid hostname {hostname!r}", "match": False,
+                "expected": None, "resolved": []}
+    ip_res = vps_public_ip(ssh_target)
+    if not ip_res["ok"]:
+        return {"ok": False, "error": f"couldn't determine VPS IP: {ip_res['error']}",
+                "match": False, "expected": None, "resolved": []}
+    expected = ip_res["ip"]
+    ok, out = run_ssh(ssh_target,
+                      f"getent ahostsv4 {hostname} 2>/dev/null | awk '{{print $1}}' | sort -u")
+    resolved = sorted({line.strip() for line in (out or "").splitlines() if line.strip()}) if ok else []
+    match = expected in resolved
+    error = None
+    if not resolved:
+        error = f"{hostname} does not resolve yet (create an A record -> {expected})"
+    elif not match:
+        error = f"{hostname} resolves to {resolved}, expected {expected}"
+    return {"ok": bool(resolved) and match, "error": error, "match": match,
+            "expected": expected, "resolved": resolved}
+
+
+def recreate_app(ssh_target: str, remote_dir: str) -> dict[str, Any]:
+    """Recreate (NOT restart) a client's app container so a changed .env is
+    actually re-read — container env is fixed at CREATE time; a plain
+    `docker restart` silently keeps the old environment (bit us live,
+    2026-07-19). `cd` into the checkout so compose finds the base +
+    override files, and pin -p as always (see the project-name incident in
+    README)."""
+    if not ssh_target or not remote_dir:
+        return {"ok": False, "error": "no ssh_target/remote_dir configured"}
+    shell_dir = _shell_remote_dir(remote_dir.rstrip("/"))
+    project = _project_name(remote_dir)
+    cmd = (f"cd {shell_dir} && docker compose -p {project} up -d app 2>&1 "
+           f"&& echo ===RECREATE_OK===")
+    ok, out = run_ssh(ssh_target, cmd, timeout=120)
+    if not ok or "===RECREATE_OK===" not in out:
+        return {"ok": False, "error": out.strip()[-500:] or "ssh failed"}
+    return {"ok": True, "error": None}

@@ -294,6 +294,29 @@ copying between clients; store credentials ONCE, assign them many times:
   client's current `.env` once and seeds the vault — the troublesome
   copy flow runs exactly one final time, then never again.
 
+### UX-4 (2026-07-19, after live testing): the one-button standard
+
+Live testing of the stepper produced the decisive feedback: "unclear what
+to do, steps not explained, not connected, no flow — at 100 deploys this
+is still an ordeal." The corrected north star, now partially shipped and
+binding for all future work on this screen:
+
+- **The operator's entire job is: three fields → Deploy → create the DNS
+  record it asks for. Nothing else.** Saving the form starts the full run
+  (shipped). The credentials step self-serves by importing the template
+  client's working credentials automatically (shipped). Every remaining
+  pause that isn't DNS is a defect to be engineered away, not documented.
+- **No internal vocabulary on the main path.** "Vault", "sets", "template
+  client", "site_config" may appear on the Credentials tab for power use
+  (rotation), never as something the deploy flow requires the operator to
+  learn. Plain language in every step title and failure message.
+- **At 100 deploys**: a queue — paste rows of (business name, subdomain),
+  the console works through them with the same engine, one progress line
+  each, pausing the whole queue only on real failures. This is the true
+  Phase-3 item, ahead of CI/CD.
+- A failure must always render as: what went wrong in one plain sentence,
+  and ONE button that retries from the right place.
+
 ### Explicitly out of scope
 
 - Automating DNS record creation (registrar API — different trust

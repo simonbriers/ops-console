@@ -1170,3 +1170,513 @@ document.addEventListener("DOMContentLoaded", () => {
 
   startPolling();
 });
+// ===========================================================================
+// Onboarding v2 UI (docs/ONBOARDING_V2_PLAN.md): tab navigation, the
+// resumable onboarding stepper, the credentials vault, and the smoke/
+// validate checks in the client detail modal. Appended to app.js — reuses
+// its $ / show / hide / escapeHtml helpers and latestResults state.
+// ===========================================================================
+
+// -- tab navigation ----------------------------------------------------------
+
+const PAGES = ["dashboard", "onboarding", "credentials", "host"];
+
+function switchPage(page) {
+  PAGES.forEach((p) => {
+    const el = document.getElementById(`page-${p}`);
+    if (el) el.classList.toggle("hidden", p !== page);
+  });
+  document.querySelectorAll("#mainTabs .tab").forEach((btn) => {
+    btn.classList.toggle("active", btn.dataset.page === page);
+  });
+  if (page === "onboarding") { refreshOnboardings(); populateObTemplateSelect(); }
+  if (page === "credentials") { refreshVault(); populateVaultClientSelect(); }
+}
+
+// -- onboarding stepper ------------------------------------------------------
+
+let obSteps = [];              // [{id,title,detail}] from /api/onboardings/steps
+let obCurrent = null;          // deploy_name of the opened onboarding
+let obRunning = false;
+
+async function fetchObSteps() {
+  if (obSteps.length) return obSteps;
+  const r = await fetch("/api/onboardings/steps");
+  obSteps = await r.json();
+  return obSteps;
+}
+
+function populateObTemplateSelect() {
+  const sel = $("obTemplateSelect");
+  if (!sel) return;
+  sel.innerHTML = latestResults.map((c) =>
+    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join("") ||
+    `<option value="">(no clients yet — register/monitor one first)</option>`;
+}
+
+async function refreshOnboardings() {
+  await fetchObSteps();
+  const r = await fetch("/api/onboardings");
+  const list = await r.json();
+  const el = $("obList");
+  if (!list.length) { el.innerHTML = `<p class="empty">None yet.</p>`; return; }
+  el.innerHTML = list.map((o) => {
+    const chips = obSteps.map((s) => {
+      const st = o.steps[s.id] || "pending";
+      return `<span class="ob-chip ob-${st}" title="${escapeHtml(s.title)}: ${st}">${escapeHtml(s.title)}</span>`;
+    }).join("");
+    const state = o.torn_down ? " (torn down)" : "";
+    return `<div class="ob-card" data-name="${escapeHtml(o.deploy_name)}">
+      <strong>${escapeHtml(o.display_name || o.deploy_name)}</strong>
+      <span class="muted">${escapeHtml(o.hostname || "")} — ${o.progress}${state}</span>
+      <div class="ob-chiprow">${chips}</div>
+    </div>`;
+  }).join("");
+  el.querySelectorAll(".ob-card").forEach((card) => {
+    card.addEventListener("click", () => openOnboarding(card.dataset.name));
+  });
+  if (obCurrent) renderStepper();
+}
+
+async function openOnboarding(name) {
+  obCurrent = name;
+  show("obDetail");
+  await renderStepper();
+  $("obDetail").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+async function renderStepper() {
+  if (!obCurrent) return;
+  await fetchObSteps();
+  const r = await fetch(`/api/onboardings/${encodeURIComponent(obCurrent)}`);
+  if (!r.ok) { hide("obDetail"); obCurrent = null; return; }
+  const rec = await r.json();
+  $("obDetailTitle").textContent =
+    `${rec.bundle.display_name || rec.deploy_name} — ${rec.bundle.hostname || "no hostname yet"}` +
+    (rec.torn_down ? " (torn down)" : "");
+  const stepsEl = $("obStepper");
+  stepsEl.innerHTML = obSteps.map((s, i) => {
+    const st = rec.steps[s.id] || { status: "pending", detail: "" };
+    return `<div class="ob-step ob-${st.status}">
+      <span class="ob-step-num">${i + 1}</span>
+      <span class="ob-step-body">
+        <strong>${escapeHtml(s.title)}</strong>
+        <span class="muted">${escapeHtml(st.detail || s.detail)}</span>
+      </span>
+      <span class="ob-step-status">${st.status}</span>
+      <button type="button" class="ob-run" data-step="${s.id}"
+        ${obRunning ? "disabled" : ""}>${st.status === "ok" ? "Re-run" : "Run"}</button>
+    </div>`;
+  }).join("");
+  stepsEl.querySelectorAll(".ob-run").forEach((btn) => {
+    btn.addEventListener("click", () => runObStep(btn.dataset.step));
+  });
+  // credentials step needs the vault multiselect visible
+  const credsPick = $("obCredsPick");
+  const credsPending = (rec.steps.credentials || {}).status !== "ok";
+  credsPick.classList.toggle("hidden", !credsPending);
+  if (credsPending) renderObCredsSets();
+  const res = rec.result || {};
+  $("obResultInfo").innerHTML = res.port ? `<p class="muted">Instance: port ${res.port},
+    <code>${escapeHtml(res.remote_dir || "")}</code>${res.admin_password
+      ? ` — admin password <code>${escapeHtml(res.admin_password)}</code>` : ""}</p>` : "";
+}
+
+async function renderObCredsSets() {
+  const r = await fetch("/api/vault/sets");
+  const sets = await r.json();
+  const el = $("obCredsSets");
+  if (sets.length) {
+    el.innerHTML = sets.map((s) => `<label class="ob-set"><input type="checkbox" value="${escapeHtml(s.id)}" />
+        ${escapeHtml(s.name)} <span class="muted">(${escapeHtml(s.kind)})</span></label>`).join("");
+    return;
+  }
+  // Empty vault: offer the fix RIGHT HERE instead of sending the operator
+  // off to another tab mid-process (2026-07-19 feedback: "all too
+  // confusing"). One click imports the template client's working
+  // credentials and re-renders the checkboxes in place.
+  const rec = obCurrent ? await (await fetch(`/api/onboardings/${encodeURIComponent(obCurrent)}`)).json() : null;
+  const tmpl = rec?.bundle?.template_client_name || (latestResults[0] || {}).name || "";
+  el.innerHTML = `<p class="empty">No credentials stored yet.</p>
+    <button type="button" id="obCredsImportBtn" class="primary">
+      Import working credentials from ${escapeHtml(tmpl)}</button>
+    <span class="muted" id="obCredsImportStatus"></span>`;
+  const btn = document.getElementById("obCredsImportBtn");
+  if (btn) btn.addEventListener("click", async () => {
+    const st = document.getElementById("obCredsImportStatus");
+    st.textContent = "importing…";
+    const resp = await fetch("/api/vault/import", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ client_name: tmpl }) });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || !data.ok) { st.textContent = data.detail || data.error || "import failed"; return; }
+    await renderObCredsSets();          // re-render: checkboxes appear
+    document.querySelectorAll("#obCredsSets input[type=checkbox]").forEach((c) => { c.checked = true; });
+  });
+}
+
+async function runObStep(stepId, opts = {}) {
+  if ((obRunning && !opts.fromChain) || !obCurrent) return false;
+  obRunning = true;
+  let stepOk = false;
+  const consoleEl = $("obConsole");
+  consoleEl.textContent = `— running ${stepId} —\n`;
+  show("obConsole");
+  const setIds = [...document.querySelectorAll("#obCredsSets input:checked")].map((i) => i.value);
+  try {
+    const resp = await fetch(
+      `/api/onboardings/${encodeURIComponent(obCurrent)}/step/${encodeURIComponent(stepId)}/run`,
+      { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ set_ids: setIds }) });
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === "log") {
+          consoleEl.textContent += ev.line + "\n";
+          consoleEl.scrollTop = consoleEl.scrollHeight;
+        } else if (ev.type === "result") {
+          stepOk = !!ev.ok;
+          consoleEl.textContent += ev.ok
+            ? `\n✔ ${stepId} ok\n`
+            : `\n✘ ${stepId} failed: ${ev.error || "see log above"}\n`;
+        }
+      }
+    }
+  } catch (e) {
+    consoleEl.textContent += `\n(request failed: ${e})\n`;
+  }
+  obRunning = false;
+  if (!opts.fromChain) {
+    await renderStepper();
+    await refreshOnboardings();
+  }
+  return stepOk;
+}
+
+// -- "Run remaining steps": the hands-off mode. Starts at the first step
+// that isn't ok and runs forward. The DNS step is special-cased: a failure
+// there usually just means propagation hasn't happened yet, so it retries
+// every 20s (up to 30 attempts ≈ 10 minutes) with a visible countdown
+// instead of stopping the chain. Any OTHER failure stops the chain — that's
+// a real problem to look at, and every step stays individually re-runnable.
+let obChainActive = false;
+
+async function runObRemaining() {
+  if (obChainActive || obRunning || !obCurrent) return;
+  obChainActive = true;
+  const btn = $("obRunAllBtn");
+  btn.textContent = "Stop auto-run";
+  const consoleEl = $("obConsole");
+  show("obConsole");
+  try {
+    const r = await fetch(`/api/onboardings/${encodeURIComponent(obCurrent)}`);
+    const rec = await r.json();
+    await fetchObSteps();
+    const pending = obSteps.map((st) => st.id)
+      .filter((id) => (rec.steps[id] || {}).status !== "ok");
+    for (const stepId of pending) {
+      if (!obChainActive) { consoleEl.textContent += "\n(auto-run stopped)\n"; break; }
+      if (stepId === "credentials"
+          && !document.querySelectorAll("#obCredsSets input:checked").length) {
+        consoleEl.textContent += "\nno credentials selected — importing working ones "
+          + "from the template client automatically…\n";
+        const rr = await fetch(`/api/onboardings/${encodeURIComponent(obCurrent)}`);
+        const rrec = await rr.json();
+        const tmpl = rrec?.bundle?.template_client_name || "";
+        await fetch("/api/vault/import", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ client_name: tmpl }) }).catch(() => null);
+        await renderObCredsSets();
+        document.querySelectorAll("#obCredsSets input[type=checkbox]")
+          .forEach((c) => { c.checked = true; });
+        if (!document.querySelectorAll("#obCredsSets input:checked").length) {
+          consoleEl.textContent += "⏸ nothing usable found in " + tmpl + "'s configuration "
+            + "— add a credential set on the Credentials tab, then press the button again.\n";
+          break;
+        }
+        consoleEl.textContent += "credentials imported — continuing.\n";
+      }
+      let ok = await runObStep(stepId, { fromChain: true });
+      if (stepId === "dns") {
+        let attempts = 0;
+        while (!ok && obChainActive && attempts < 30) {
+          attempts += 1;
+          for (let sLeft = 20; sLeft > 0 && obChainActive; sLeft--) {
+            btn.textContent = `Stop auto-run (DNS retry in ${sLeft}s)`;
+            await new Promise((res) => setTimeout(res, 1000));
+          }
+          btn.textContent = "Stop auto-run";
+          if (!obChainActive) break;
+          consoleEl.textContent += `\n— DNS re-check ${attempts}/30 —\n`;
+          ok = await runObStep("dns", { fromChain: true });
+        }
+      }
+      if (!ok) {
+        if (obChainActive) consoleEl.textContent +=
+          `\n⏹ auto-run stopped at ${stepId} — fix and press Run remaining steps to resume.\n`;
+        break;
+      }
+      await renderStepper();
+    }
+  } finally {
+    obChainActive = false;
+    btn.textContent = "Run remaining steps";
+    await renderStepper();
+    await refreshOnboardings();
+  }
+}
+
+async function submitObForm(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const body = Object.fromEntries(fd.entries());
+  const r = await fetch("/api/onboardings", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body) });
+  if (!r.ok) {
+    const err = await r.json().catch(() => ({}));
+    alert(`Could not save intake: ${err.detail || r.status}`);
+    return;
+  }
+  const rec = await r.json();
+  await refreshOnboardings();
+  await openOnboarding(rec.deploy_name);
+  // One-button flow (2026-07-19 feedback: "no flow"): saving the form IS
+  // starting the deploy. Everything runs hands-off from here; the chain
+  // only ever waits for DNS (auto-retry) and reports failures in place.
+  runObRemaining();
+}
+
+async function teardownCurrent() {
+  const confirmVal = $("obTeardownConfirm").value.trim();
+  if (confirmVal !== obCurrent) {
+    alert("Type the deploy name exactly to confirm teardown.");
+    return;
+  }
+  const consoleEl = $("obConsole");
+  consoleEl.textContent = "— teardown —\n";
+  show("obConsole");
+  const resp = await fetch(`/api/onboardings/${encodeURIComponent(obCurrent)}/teardown`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: confirmVal }) });
+  const text = await resp.text();
+  for (const line of text.trim().split("\n")) {
+    try {
+      const ev = JSON.parse(line);
+      consoleEl.textContent += (ev.type === "log" ? ev.line
+        : ev.ok ? "✔ teardown complete" : `✘ ${ev.error}`) + "\n";
+    } catch { /* ignore */ }
+  }
+  hide("obTeardownConfirm"); hide("obTeardownGo");
+  await renderStepper();
+  await refreshOnboardings();
+  refreshClients();
+}
+
+// -- credentials vault -------------------------------------------------------
+
+const VAULT_FIELDS = {
+  "mistral": ["MISTRAL_API_KEY"],
+  "smtp": ["SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_USE_TLS"],
+  "twilio": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"],
+  "file/google_tts": [],
+};
+
+function renderVaultFields() {
+  const kind = $("vaultKindSelect").value;
+  const el = $("vaultFields");
+  if (kind === "file/google_tts") {
+    el.innerHTML = `<label>google_tts.json file <input type="file" id="vaultFileInput" accept=".json" /></label>`;
+    return;
+  }
+  el.innerHTML = (VAULT_FIELDS[kind] || []).map((k) =>
+    `<label>${escapeHtml(k)} <input name="v_${escapeHtml(k)}"
+       type="${/PASSWORD|KEY|TOKEN/.test(k) ? "password" : "text"}" /></label>`).join("");
+}
+
+async function refreshVault() {
+  const r = await fetch("/api/vault/sets");
+  const sets = await r.json();
+  const body = $("vaultTableBody");
+  if (!sets.length) {
+    body.innerHTML = `<tr><td colspan="5" class="empty">No sets yet — add one below or import from a client.</td></tr>`;
+    return;
+  }
+  body.innerHTML = sets.map((s) => `<tr>
+    <td><label><input type="checkbox" class="vault-pick" value="${escapeHtml(s.id)}" /> ${escapeHtml(s.name)}</label></td>
+    <td>${escapeHtml(s.kind)}</td>
+    <td class="muted">${s.has_file ? "(file)" : escapeHtml(Object.keys(s.values || {}).join(", "))}</td>
+    <td class="muted">${escapeHtml(s.updated || "")}</td>
+    <td><button type="button" class="danger vault-del" data-id="${escapeHtml(s.id)}">Delete</button></td>
+  </tr>`).join("");
+  body.querySelectorAll(".vault-del").forEach((btn) => {
+    btn.addEventListener("click", async () => {
+      if (!confirm("Delete this credential set? Clients keep whatever was already applied.")) return;
+      await fetch(`/api/vault/sets/${btn.dataset.id}`, { method: "DELETE" });
+      refreshVault();
+    });
+  });
+}
+
+function populateVaultClientSelect() {
+  const sel = $("vaultClientSelect");
+  if (!sel) return;
+  sel.innerHTML = latestResults.map((c) =>
+    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join("");
+}
+
+async function submitVaultForm(e) {
+  e.preventDefault();
+  const fd = new FormData(e.target);
+  const kind = fd.get("kind");
+  const status = $("vaultFormStatus");
+  const body = { name: fd.get("name"), kind, values: {}, id: fd.get("id") || null };
+  for (const [k, v] of fd.entries()) {
+    if (k.startsWith("v_") && String(v).trim()) body.values[k.slice(2)] = v;
+  }
+  if (kind === "file/google_tts") {
+    const file = ($("vaultFileInput") || {}).files?.[0];
+    if (!file) { status.textContent = "pick the google_tts.json file first"; return; }
+    body.content_b64 = btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer())));
+  }
+  status.textContent = "saving…";
+  const r = await fetch("/api/vault/sets", {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+  const data = await r.json().catch(() => ({}));
+  status.textContent = r.ok ? "saved" : (data.detail || "failed");
+  if (r.ok) { e.target.reset(); renderVaultFields(); refreshVault(); }
+}
+
+async function vaultImport() {
+  const client = $("vaultClientSelect").value;
+  const status = $("vaultApplyStatus");
+  status.textContent = "importing…";
+  const r = await fetch("/api/vault/import", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ client_name: client }) });
+  const data = await r.json().catch(() => ({}));
+  status.textContent = r.ok
+    ? `imported ${data.created?.length ?? 0} set(s) from ${client}`
+    : (data.detail || data.error || "import failed");
+  refreshVault();
+}
+
+async function vaultApply() {
+  const client = $("vaultClientSelect").value;
+  const setIds = [...document.querySelectorAll(".vault-pick:checked")].map((i) => i.value);
+  const status = $("vaultApplyStatus");
+  if (!setIds.length) { status.textContent = "check at least one set in the table above"; return; }
+  status.textContent = "applying + testing + recreating…";
+  const r = await fetch(`/api/clients/${encodeURIComponent(client)}/apply-credentials`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ set_ids: setIds }) });
+  const data = await r.json().catch(() => ({}));
+  const tests = (data.tests || []).map((t) => `${t.kind}:${t.ok ? "ok" : "FAIL"}`).join(" ");
+  status.textContent = data.ok
+    ? `applied ${data.applied?.join(", ")} — container recreated. ${tests}`
+    : `${data.error || data.detail || "failed"} ${tests}`;
+}
+
+// -- smoke + validate in the client detail modal -----------------------------
+
+let smokeBusy = false;
+
+async function runSmokeFromDetail() {
+  const name = $("detailName").textContent;
+  if (!name || smokeBusy) return;
+  smokeBusy = true;
+  const el = $("smokeResults");
+  el.innerHTML = "running smoke suite (the chat round-trip can take ~30s)…";
+  try {
+    const r = await fetch(`/api/clients/${encodeURIComponent(name)}/smoke`, { method: "POST" });
+    const data = await r.json();
+    el.innerHTML = (data.checks || []).map((c) =>
+      `<div class="smoke-row ${c.ok ? "smoke-ok" : "smoke-fail"}">
+         ${c.ok ? "✔" : "✘"} <strong>${escapeHtml(c.check)}</strong>
+         <span class="muted">${escapeHtml(c.detail)}</span></div>`).join("")
+      || `error: ${escapeHtml(data.detail || "no checks returned")}`;
+  } catch (e) {
+    el.textContent = `smoke request failed: ${e}`;
+  }
+  smokeBusy = false;
+}
+
+async function validateCfgFromDetail() {
+  const name = $("detailName").textContent;
+  if (!name) return;
+  const el = $("smokeResults");
+  el.innerHTML = "validating live site_config.yaml…";
+  try {
+    const r = await fetch(`/api/clients/${encodeURIComponent(name)}/validate-config`, { method: "POST" });
+    const data = await r.json();
+    const rows = [
+      ...(data.errors || []).map((x) => `<div class="smoke-row smoke-fail">✘ ${escapeHtml(x)}</div>`),
+      ...(data.warnings || []).map((x) => `<div class="smoke-row smoke-warn">⚠ ${escapeHtml(x)}</div>`),
+    ];
+    el.innerHTML = data.ok && !rows.length
+      ? `<div class="smoke-row smoke-ok">✔ config valid, no warnings</div>`
+      : (rows.join("") || `error: ${escapeHtml(data.detail || "no result")}`);
+  } catch (e) {
+    el.textContent = `validate request failed: ${e}`;
+  }
+}
+
+// -- wiring ------------------------------------------------------------------
+
+document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll("#mainTabs .tab").forEach((btn) => {
+    btn.addEventListener("click", () => switchPage(btn.dataset.page));
+  });
+  // Header shortcuts land on the matching page. The buttons already have
+  // modal-opening listeners from the original DOMContentLoaded handler
+  // (which ran before this one — registration order); at the target
+  // element, capture/bubble listeners all fire in registration order, so
+  // stopImmediatePropagation could never suppress them from here. Cloning
+  // the node strips the old anonymous listeners cleanly instead. The old
+  // modals stay reachable: provisioning now lives in the stepper's
+  // provision step; the legacy .env copy tool via its button on the
+  // Credentials page.
+  for (const [btnId, page] of [["newClientBtn", "onboarding"], ["credsBtn", "credentials"]]) {
+    const oldBtn = $(btnId);
+    const fresh = oldBtn.cloneNode(true);
+    oldBtn.replaceWith(fresh);
+    fresh.addEventListener("click", () => switchPage(page));
+  }
+  $("openLegacyCredsBtn").addEventListener("click", () => openCredsModal());
+
+  $("obForm").addEventListener("submit", submitObForm);
+  // Auto-suggest the subdomain from the deploy name while the subdomain
+  // field is untouched — for most clients they're the same word.
+  const obDeployInput = document.querySelector('#obForm input[name="deploy_name"]');
+  const obSubInput = $("obSubdomain");
+  let obSubTouched = false;
+  obSubInput.addEventListener("input", () => { obSubTouched = !!obSubInput.value; });
+  obDeployInput.addEventListener("input", () => {
+    if (!obSubTouched) obSubInput.value = obDeployInput.value;
+  });
+  $("obRunAllBtn").addEventListener("click", () => {
+    if (obChainActive) { obChainActive = false; return; }
+    runObRemaining();
+  });
+  $("obTeardownBtn").addEventListener("click", () => {
+    show("obTeardownConfirm"); show("obTeardownGo");
+  });
+  $("obTeardownGo").addEventListener("click", teardownCurrent);
+  $("vaultKindSelect").addEventListener("change", renderVaultFields);
+  $("vaultForm").addEventListener("submit", submitVaultForm);
+  $("vaultImportBtn").addEventListener("click", vaultImport);
+  $("vaultApplyBtn").addEventListener("click", vaultApply);
+  $("smokeRunBtn").addEventListener("click", runSmokeFromDetail);
+  $("validateCfgBtn").addEventListener("click", validateCfgFromDetail);
+  renderVaultFields();
+});

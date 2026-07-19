@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <title>ops-console</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="/static/style.css" />
+  <link rel="stylesheet" href="/static/style.css?v=obv2-3" />
 </head>
 <body>
   <header>
@@ -12,14 +12,22 @@
     <div class="header-actions">
       <span id="statusBar" class="status-bar">Loading…</span>
       <button id="refreshBtn">Refresh now</button>
-      <button id="newClientBtn" class="primary">New client</button>
+      <button id="newClientBtn" class="primary">Onboard new client</button>
       <button id="credsBtn">Credentials</button>
       <button id="settingsBtn">Settings</button>
-      <button id="addClientBtn">Add existing…</button>
+      <button id="addClientBtn">Register existing…</button>
     </div>
   </header>
 
   <main>
+    <nav id="mainTabs" class="main-tabs">
+      <button class="tab active" data-page="dashboard">Dashboard</button>
+      <button class="tab" data-page="onboarding">Onboarding</button>
+      <button class="tab" data-page="credentials">Credentials</button>
+      <button class="tab" data-page="host">Host / VPS</button>
+    </nav>
+
+    <div id="page-host" class="page hidden">
     <section id="infraPanel" class="infra-panel">
       <div id="infraGauges" class="infra-gauges"></div>
       <div class="infra-sites">
@@ -36,7 +44,9 @@
 
       <div id="infraDiskBreakdown" class="infra-disk-breakdown"></div>
     </section>
+    </div><!-- /page-host -->
 
+    <div id="page-dashboard" class="page">
     <section id="impactPanel" class="impact-panel">
       <h3>This month, across every client</h3>
       <div id="impactCards" class="impact-cards"></div>
@@ -59,6 +69,93 @@
         <tr><td colspan="8" class="empty">No clients configured yet — click "Add client" to start monitoring one.</td></tr>
       </tbody>
     </table>
+    </div><!-- /page-dashboard -->
+
+    <div id="page-onboarding" class="page hidden">
+      <section class="ob-panel">
+        <h3>Deploy a new client</h3>
+        <p class="muted">Fill three fields, click Deploy, watch it go. The only thing it will ever
+        wait for is your DNS record (it re-checks automatically). Close the browser any time —
+        every deploy below remembers exactly where it is and continues from there.</p>
+        <form id="obForm" class="ob-form">
+          <label>Deploy name <input name="deploy_name" pattern="[a-z][a-z0-9-]*" placeholder="acme-dental" required /></label>
+          <label>Display name <input name="display_name" placeholder="Acme Dental" /></label>
+          <label>Subdomain <span class="host-compose"><input name="hostname" id="obSubdomain" placeholder="acme" pattern="[a-z][a-z0-9-]*" /><span class="host-suffix">.my-ai-receptionist.com</span></span><span class="muted">just the first part — the domain is fixed and added automatically</span></label>
+          <label>Same VPS as <select name="template_client_name" id="obTemplateSelect"></select></label>
+          <button type="submit" class="primary">Deploy</button>
+        </form>
+      </section>
+
+      <section class="ob-panel">
+        <h3>Onboardings</h3>
+        <div id="obList"><p class="empty">None yet.</p></div>
+      </section>
+
+      <section id="obDetail" class="ob-panel hidden">
+        <h3 id="obDetailTitle"></h3>
+        <div class="modal-actions">
+          <button type="button" id="obRunAllBtn" class="primary">Run remaining steps</button>
+          <span class="muted">runs every not-yet-green step in order; DNS auto-retries every 20s until it propagates</span>
+        </div>
+        <div id="obStepper"></div>
+        <div id="obCredsPick" class="hidden">
+          <p class="muted">Pick the vault credential sets to apply (manage them on the Credentials tab):</p>
+          <div id="obCredsSets"></div>
+        </div>
+        <pre id="obConsole" class="newclient-console hidden"></pre>
+        <div id="obResultInfo"></div>
+        <div class="modal-actions">
+          <button type="button" id="obTeardownBtn" class="danger">Teardown this instance…</button>
+          <input id="obTeardownConfirm" class="hidden" placeholder="type the deploy name to confirm" />
+          <button type="button" id="obTeardownGo" class="danger hidden">Confirm teardown</button>
+        </div>
+      </section>
+    </div><!-- /page-onboarding -->
+
+    <div id="page-credentials" class="page hidden">
+      <section class="ob-panel">
+        <h3>Credential vault</h3>
+        <p class="muted">Store each credential ONCE, assign it to any client. Rotating a key =
+        edit it here, then re-apply to the clients that use it. Values are stored in this
+        console's own data volume (same trust level as the admin tokens in clients.json).</p>
+        <table id="vaultTable">
+          <thead><tr><th>Name</th><th>Kind</th><th>Keys</th><th>Updated</th><th></th></tr></thead>
+          <tbody id="vaultTableBody"><tr><td colspan="5" class="empty">No sets yet — add one below or import from a client.</td></tr></tbody>
+        </table>
+      </section>
+
+      <section class="ob-panel">
+        <h3>Add / edit a set</h3>
+        <form id="vaultForm" class="ob-form">
+          <input type="hidden" name="id" />
+          <label>Name <input name="name" placeholder="Mistral main key" required /></label>
+          <label>Kind
+            <select name="kind" id="vaultKindSelect">
+              <option value="mistral">mistral (LLM key)</option>
+              <option value="smtp">smtp (mail)</option>
+              <option value="twilio">twilio (SMS)</option>
+              <option value="file/google_tts">google_tts.json (file)</option>
+            </select>
+          </label>
+          <div id="vaultFields"></div>
+          <button type="submit" class="primary">Save set</button>
+          <span id="vaultFormStatus" class="muted"></span>
+        </form>
+      </section>
+
+      <section class="ob-panel">
+        <h3>Apply to a client / import</h3>
+        <div class="ob-form">
+          <label>Client <select id="vaultClientSelect"></select></label>
+          <button type="button" id="vaultImportBtn">Import this client's .env into the vault</button>
+          <button type="button" id="vaultApplyBtn" class="primary">Apply checked sets to this client</button>
+          <span id="vaultApplyStatus" class="muted"></span>
+        </div>
+        <p class="muted">Applying merges the sets into the client's <code>.env</code> (backed up
+        server-side), tests each credential, and recreates the container so values take effect.</p>
+        <button type="button" id="openLegacyCredsBtn">Open the legacy .env copy tool…</button>
+      </section>
+    </div><!-- /page-credentials -->
   </main>
 
   <!-- Detail modal -->
@@ -103,6 +200,15 @@
       <section>
         <h3>Uptime &amp; latency (from ops-console's own history)</h3>
         <div id="detailUptime"></div>
+      </section>
+
+      <section>
+        <h3>Checks</h3>
+        <div class="modal-actions">
+          <button type="button" id="smokeRunBtn">Run smoke suite</button>
+          <button type="button" id="validateCfgBtn">Validate live config</button>
+        </div>
+        <div id="smokeResults" class="muted"></div>
       </section>
 
       <div class="modal-actions">
@@ -249,6 +355,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=obv2-3"></script>
 </body>
 </html>
