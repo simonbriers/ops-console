@@ -381,11 +381,48 @@ original plan). Whichever store is currently active (venv's project-root
 file, or Docker's volume) needs it added by hand if it's missing:
 ```json
 "hosts": [
-  {"name": "Hetzner VPS", "ssh_target": "deploy@chat.briers.eu",
+  {"name": "Hetzner VPS", "ssh_target": "deploy@chat.my-ai-receptionist.com",
    "caddyfile_path": "~/dental-clinic-agent/deploy/Caddyfile",
    "env_path": "~/dental-clinic-agent/.env"}
 ]
 ```
+
+## SSH-fetched admin metrics for tunnel-only instances (2026-07-19)
+
+An instance that sets `ADMIN_TUNNEL_ONLY` in its own `.env` (currently:
+PrimeConnect AI) hides its ENTIRE admin surface from the public internet —
+`/admin/metrics` and `/admin/audit` return 404 through the reverse proxy,
+so the plain-HTTPS usage/interactions checks would show "unknown" forever.
+Two per-client fields in clients.json handle this:
+
+```json
+{"admin_via_ssh": true, "admin_local_port": 8002}
+```
+
+With `admin_via_ssh` set, `core._admin_get_json()` fetches those two
+endpoints by running `curl http://127.0.0.1:<port>/admin/...` ON the VPS
+via the same `run_ssh()` (mounted key) every other SSH check uses — the
+admin token still goes in the `X-Admin-Token` header but never crosses the
+public internet. Loopback ports on the shared VPS: 8000 primary demo,
+8001 Clínica Valor, 8002 PrimeConnect AI. Instances with public admin can
+keep `admin_via_ssh: false` (plain HTTPS, as before). The UI's client
+editor round-trips both fields (`ClientIn` in routes.py — if you add more
+client fields, add them there too or a UI edit silently strips them).
+
+**Docker config store is authoritative and survives rebuilds.** Reminder
+with teeth (see the section above): the Docker path reads
+`/data/clients.json` from the `app_data_local` VOLUME — `docker compose up
+--build --force-recreate` rebuilds CODE but never touches that volume, so
+editing the repo's `clients.json` does nothing until you push it in:
+
+```powershell
+docker cp clients.json ops-console-local:/data/clients.json
+```
+
+No restart needed — config is re-read from disk on every poll. Also note
+`ssh_target` everywhere is `deploy@chat.my-ai-receptionist.com` now;
+`chat.briers.eu` is retired (no TLS answer) and must not be used as a
+chatbot OR tooling address anymore.
 
 ## A path bug worth understanding if it ever looks like it's back
 
