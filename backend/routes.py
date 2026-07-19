@@ -43,6 +43,13 @@ class ClientIn(BaseModel):
     cost_per_1k_input_tokens: float | None = None
     cost_per_1k_cached_tokens: float | None = None
     cost_per_1k_output_tokens: float | None = None
+    # Admin-API transport (see core._admin_get_json): when admin_via_ssh is
+    # true, /admin/metrics and /admin/audit are fetched by curling the
+    # instance's loopback port ON its VPS over SSH instead of public HTTPS —
+    # required once that instance hides its admin surface behind
+    # ADMIN_TUNNEL_ONLY, and keeps the admin token off the public internet.
+    admin_via_ssh: bool = False
+    admin_local_port: int | None = None
 
 
 class SettingsIn(BaseModel):

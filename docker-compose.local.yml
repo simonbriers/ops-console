@@ -1,6 +1,12 @@
 # Local dev/iteration run — port-mapped (works on Docker Desktop, unlike
 # network_mode: host), same split as dental-clinic-agent's own
 # docker-compose.local.yml vs docker-compose.yml.
+#
+# Host port moved from 8100 -> 8101: 8100 collides with primeconnect1's own
+# local prod-parity preview (docker-compose.yml there: "127.0.0.1:8100:3000",
+# also baked into several site_config.yaml allowed_embed_domains lists as
+# "primeconnect1's local dev origin") — that convention is referenced in
+# more places than this one, so this side moves instead.
 name: ops-console-local
 
 services:
@@ -12,7 +18,7 @@ services:
     container_name: ops-console-local
     restart: unless-stopped
     ports:
-      - "8100:8000"
+      - "8101:8000"
     volumes:
       - app_data_local:/data
       # SSH key + known_hosts, read-only — needed ONLY for the version

@@ -28,12 +28,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import shlex
 import re
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlencode
 from datetime import datetime
 from typing import Any
 
@@ -893,6 +895,43 @@ def _month_bounds(now: datetime | None = None) -> tuple[str, str]:
     return start.isoformat(), now.isoformat()
 
 
+
+def _admin_get_json(client: dict[str, Any], path: str, params: dict[str, Any]) -> Any:
+    """GET an admin-API path on a monitored instance and parse the JSON.
+
+    Two transports:
+    - default: plain HTTPS to {base_url}{path} with the X-Admin-Token header —
+      works while the instance's admin surface is publicly reachable.
+    - "admin_via_ssh": true (+ "admin_local_port"): run curl ON the VPS via
+      run_ssh against the instance's loopback port. This is the only way in
+      once an instance sets ADMIN_TUNNEL_ONLY (its admin surface then 404s
+      through the reverse proxy), and is preferable anyway — the admin token
+      never crosses the public internet. Uses the same mounted ~/.ssh key as
+      every other SSH check in this file.
+    Raises on any transport or parse failure; callers already catch broadly.
+    """
+    token = _real_token(client)
+    if client.get("admin_via_ssh"):
+        port = client.get("admin_local_port")
+        ssh_target = client.get("ssh_target") or ""
+        if not port:
+            raise RuntimeError("admin_via_ssh is set but admin_local_port is missing")
+        if not ssh_target:
+            raise RuntimeError("admin_via_ssh is set but ssh_target is missing")
+        url = f"http://127.0.0.1:{int(port)}{path}?{urlencode(params)}"
+        cmd = ("curl -fsS -m 15 -H " + shlex.quote(f"X-Admin-Token: {token}")
+               + " " + shlex.quote(url))
+        ok, out = run_ssh(ssh_target, cmd, timeout=SSH_TIMEOUT + 10)
+        if not ok:
+            raise RuntimeError(f"ssh admin fetch failed: {out[:300]}")
+        return json.loads(out)
+    base = (client.get("base_url") or "").rstrip("/")
+    resp = requests.get(f"{base}{path}", params=params,
+                        headers={"X-Admin-Token": token}, timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def check_usage(client: dict[str, Any], start: str | None = None, end: str | None = None) -> dict[str, Any]:
     """GET {base_url}/admin/metrics — the token-usage endpoint that already
     ships in the product's backend/admin.py (get_metrics). Nothing new on
@@ -914,14 +953,7 @@ def check_usage(client: dict[str, Any], start: str | None = None, end: str | Non
         start, end = _month_bounds()
 
     try:
-        resp = requests.get(
-            f"{base}/admin/metrics",
-            params={"start": start, "end": end},
-            headers={"X-Admin-Token": token},
-            timeout=HTTP_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = _admin_get_json(client, "/admin/metrics", {"start": start, "end": end})
         overall = data.get("overall") or {}
         return {
             "ok": True,
@@ -985,14 +1017,7 @@ def check_interactions(client: dict[str, Any], start: str | None = None, end: st
         return {**empty, "error": "invalid start/end"}
 
     try:
-        resp = requests.get(
-            f"{base}/admin/audit",
-            params={"limit": 1000, "page": 1},
-            headers={"X-Admin-Token": token},
-            timeout=HTTP_TIMEOUT,
-        )
-        resp.raise_for_status()
-        data = resp.json()
+        data = _admin_get_json(client, "/admin/audit", {"limit": 1000, "page": 1})
         rows = data.get("rows") if isinstance(data, dict) else None
         if rows is None:
             rows = data if isinstance(data, list) else []
