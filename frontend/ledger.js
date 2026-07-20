@@ -97,6 +97,8 @@ function renderLedgerClients() {
     return `<tr>
       <td><strong>${escapeHtml(c.name)}</strong>
         ${c.frozen ? `<span class="vault-badge vault-badge-client" title="frozen — credential applies are blocked server-side">FROZEN</span>` : ""}
+        ${c.pct_used !== null && c.pct_used !== undefined && c.pct_used > 1
+          ? `<span class="vault-badge vault-badge-client" title="usage beyond the plan allowance — overage is accruing">OVER +${Math.round((c.pct_used - 1) * 100)}%</span>` : ""}
         <div class="muted ledger-sub">${escapeHtml(p.plan_type)}${p.anchor_day ? ` · resets day ${p.anchor_day}` : ""}</div></td>
       <td>${allowance}</td>
       <td>${tok(c.usage.total)} tok<div class="muted ledger-sub">${eur(c.eur_used)} at sell rates</div>

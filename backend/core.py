@@ -1377,7 +1377,17 @@ def check_client(client: dict[str, Any]) -> dict[str, Any]:
     interactions = check_interactions(client)
     cost = compute_cost_estimate(usage, client)
 
-    quota = client.get("monthly_token_quota") or 0
+    # Phase 5 fix: the ledger's plan store is the quota authority now — the
+    # legacy clients.json field only ever seeds it, so reading clients.json
+    # here left the dashboard's "over quota" warning permanently dead once
+    # plans migrated. Lazy import: ledger imports core at module level, so a
+    # top-level import here would be circular.
+    try:
+        from backend import ledger as _ledger
+        _plan = _ledger.get_plan(client.get("name", "")) or {}
+        quota = _plan.get("allowance_tokens") or client.get("monthly_token_quota") or 0
+    except Exception:
+        quota = client.get("monthly_token_quota") or 0
     over_quota = bool(quota) and usage.get("ok") and usage.get("total_tokens", 0) > quota
 
     if not health.get("up"):
