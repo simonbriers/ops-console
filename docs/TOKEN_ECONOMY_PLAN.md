@@ -17,8 +17,22 @@ Sources: `backend/vault.py`, `backend/core.py` (`check_usage`,
 `backend/providers/llm.py` (`get_llm_info`, the key_index fallback),
 `backend/admin.py`'s `SiteConfigPatch`.
 
-Status: **DESIGN ONLY — nothing built yet.** Read Part 5 (rollout
-safety) before touching any live instance.
+Status (2026-07-20, end of build day 1): **Phases 0–5 BUILT AND
+VERIFIED.** Phase 0 acme live; Phase 1 vault v2 (roles, assignments,
+reveal, active-provider reconcile, rotation, multi-role sets); Phase 2
+ledger (sqlite snapshots, background collector, plans incl. base fee +
+token-overage, frozen enforcement); Phase 3 economics (breakage/overage/
+margin, 80/100% alerts, statements, source caps); Phase 4 Flow tab;
+Phase 5 clinic gauge + warnings — verified live on acme (red banner,
+reset date correct). Battle scars fixed along the way: per-message plan
+check loading full transcripts (chat-hang → SQL aggregate + throttle),
+dashboard over-quota chain dead after the clients.json→ledger migration,
+admin PWA service-worker cache hiding the new dashboard (v17 bump), and
+a WIZARD BUG — docker cp'd site_config.yaml owned by the host user, so
+every config write on wizard-deployed instances 500'd (fixed in
+new_client.py + chown on acme). NEXT: Phase 6 (managed mode) + Phase 7
+(config manager), rehearse on acme; then Phase 8 (voice metering).
+Read Part 5 (rollout safety) before touching any live instance.
 
 ---
 
