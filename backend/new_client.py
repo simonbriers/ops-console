@@ -450,6 +450,14 @@ def create_new_client_stream(
         f"if [ $up_status -eq 0 ]; then "
         f"sleep 3 && "
         f"docker cp {shell_dir}/site_config.yaml {deploy_name}:/data/site_config.yaml 2>&1 && "
+        # docker cp preserves the HOST file's ownership (the deploy user's),
+        # which the container's app user can READ but not WRITE — so every
+        # config save (admin panel, ops-console plan push) 500s with
+        # PermissionError. Bit acme on 2026-07-20, the first wizard-deployed
+        # instance to take a config write. chown to whatever owns /data (the
+        # app user — it creates site.sqlite there) right after the copy.
+        f"docker exec -u root {deploy_name} sh -c "
+        f"'chown --reference=/data /data/site_config.yaml && chmod 664 /data/site_config.yaml' 2>&1 && "
         # Seed-once marker: --reset wipes the DB, fine on a fresh instance,
         # destructive on a resumed one that may already hold real data.
         f"docker compose -p {deploy_name} -f {compose_file} -f {override_file} exec -T app "
