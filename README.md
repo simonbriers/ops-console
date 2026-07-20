@@ -72,10 +72,21 @@ ipv4 show excludedportrange protocol=tcp`.)
 
 ```powershell
 cd ops-console
-docker compose -f docker-compose.local.yml up --build
+.\local-deploy.ps1
 ```
 
-Open http://127.0.0.1:8100. It starts with **zero configured clients** —
+`local-deploy.ps1` is the redeploy one-liner for this path: stop → rebuild
+the image from the working tree → start → wait for `/health` and print the
+URL. Run it after any code change — the Docker path bakes code into the
+image at build time, so edits are invisible until a rebuild. Data
+(`/data`: clients.json, history, deploy log, vault) lives in the
+`app_data_local` named volume and survives every rebuild. The equivalent
+manual command is `docker compose -f docker-compose.local.yml up -d
+--build`.
+
+Open http://127.0.0.1:8101 (moved off 8100, which collides with
+primeconnect1's local preview — see the comment in
+`docker-compose.local.yml`). It starts with **zero configured clients** —
 add them from the UI ("Add Client", then "Fetch admin token via SSH" once
 `ssh_target`/`remote_dir` are filled in). The Docker path's `clients.json`
 lives *inside* the `app_data_local` named volume, at `/data/clients.json`
@@ -333,6 +344,52 @@ to "which container" — that would need fragile `ss -ltnp` /
 `/proc/<pid>/cgroup` inference. Using the `remote_dir` you already gave
 each client (`docker compose -f {remote_dir}/docker-compose.yml ps -q`) is
 exact and simple instead.
+
+## Batch updates — the Updates tab (one run instead of N modals)
+
+Updating the fleet used to mean opening each client's detail modal, typing
+its name, clicking Deploy, waiting out the build, and moving to the next
+one — fine for 3 clients, a day's work for 500. The **Updates** tab is the
+same deploy, fleet-wide:
+
+- **One table of every client that's behind `origin/master`** — running
+  commit, behind count, the actual pending commit subjects (expandable per
+  row), and an `⚠ infra` badge when the range touches
+  `docker-compose*.yml` / `Dockerfile*` / `deploy/**`. A count badge on
+  the tab itself shows how many need updates from anywhere in the app.
+  Clients already up to date (or unreachable) are summarized below the
+  table, not listed. Clicking a client's name still opens its detail
+  modal.
+- **Select all / deselect all / any subset**, then **Update selected**.
+  One typed confirmation for the whole batch — `update <N>` — instead of
+  typing each client's name. The count is checked server-side too
+  (`POST /api/deploy-batch` rejects a mismatched count or an unknown name
+  before touching anything, so a bad request deploys nothing rather than
+  half the list). A per-row Update button covers the one-off case through
+  the same flow (`update 1`).
+- **A live status column + console** during the run — each client moves
+  through queued → updating → ✔ updated @commit / ✘ failed (stage), with
+  the console showing per-client results as they land and the tail of the
+  failing stage's output on error, same information the individual deploy
+  result shows.
+- **Same guarded pipeline per client, not a new deploy path.** Every
+  client in the batch goes through the exact `core.deploy_client()` the
+  individual button uses — `git pull --ff-only` → build → container-name
+  collision precheck → `up -d`, each stage gating the next, override-aware
+  `-p`-pinned scoping and all. Each outcome is appended to the same
+  `deploy_log.jsonl` (with `"batch": true`), so per-client deploy history
+  stays in one place. One client failing never stops the rest.
+- **Concurrency that respects the boxes:** parallel across VPSes (capped
+  at `MAX_PARALLEL_DEPLOY_HOSTS`, 3), strictly **sequential per VPS** —
+  a `docker compose build` is heavy for a small VPS, and the clients most
+  likely to be batch-updated together are exactly the ones sharing a box;
+  several simultaneous builds on one host is how a routine update becomes
+  an outage.
+
+The stream speaks the same NDJSON dialect as `/new-client/stream`:
+`{"type": "start", "name"}` → `{"type": "result", "name", ok, stage,
+commit, error, output}` per client → one final `{"type": "done",
+"ok_count", "fail_count"}`.
 
 ## Running in Docker vs. venv: two separate config stores, and a real SSH limit
 

@@ -5,6 +5,7 @@ of git/docker)."""
 from __future__ import annotations
 
 import json
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -196,6 +197,77 @@ def deploy_client(name: str, body: DeployIn) -> dict[str, Any]:
 @router.get("/clients/{name}/deploy-log")
 def get_deploy_log(name: str) -> list[dict[str, Any]]:
     return deploy_log.load_recent(name)
+
+
+class DeployBatchIn(BaseModel):
+    names: list[str]
+    # The single-deploy guard ("type the client's exact name") doesn't scale
+    # to a batch — removing that per-client typing is this endpoint's whole
+    # reason to exist. The belt-and-suspenders becomes "update <count>":
+    # still impossible to fire with a stray/automated POST that doesn't know
+    # exactly how many clients it's about to touch, still checked
+    # server-side, typed ONCE regardless of whether the batch is 2 clients
+    # or 500.
+    confirm: str
+
+
+@router.post("/deploy-batch")
+def deploy_batch(body: DeployBatchIn) -> StreamingResponse:
+    """Deploys several clients in one request, streaming NDJSON progress
+    events (same dialect as /new-client/stream) so the Updates tab can show
+    a live per-client status instead of one long blank spinner:
+
+      {"type": "start",  "name": ...}                          a client began
+      {"type": "result", "name": ..., ok, stage, commit, ...}  a client done
+      {"type": "done",   "ok_count": N, "fail_count": M}       always last
+
+    Every name must resolve to a configured client and `confirm` must be
+    exactly "update <N>" (N = number of clients) — both checked BEFORE
+    anything is touched, so a bad request deploys nothing rather than
+    half the list. Concurrency: parallel across hosts, strictly sequential
+    per host (see core.deploy_batch_stream — several simultaneous docker
+    builds on one small VPS is how an update becomes an outage). Each
+    client's outcome is appended to the same deploy_log.jsonl the single
+    Deploy button uses, so per-client history stays in one place."""
+    # Dedupe while preserving order — double-submitting a name must not
+    # deploy it twice in one run.
+    names = list(dict.fromkeys(n for n in body.names if n))
+    if not names:
+        raise HTTPException(status_code=400, detail="no client names given")
+    expected = f"update {len(names)}"
+    if body.confirm.strip().lower() != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"confirmation text did not match {expected!r} — nothing was deployed")
+    clients = []
+    for n in names:
+        client = cfg.find_client(n)
+        if client is None:
+            raise HTTPException(status_code=404,
+                                detail=f"No client named {n!r} — nothing was deployed")
+        clients.append(client)
+
+    def gen():
+        try:
+            for event in core.deploy_batch_stream(clients):
+                if event.get("type") == "result":
+                    deploy_log.append({
+                        "name": event.get("name"),
+                        "requested_at": datetime.now().isoformat(timespec="seconds"),
+                        "ok": event.get("ok"),
+                        "stage": event.get("stage"),
+                        "commit": event.get("commit"),
+                        "error": event.get("error"),
+                        "batch": True,
+                    })
+                yield event
+        except Exception as exc:  # noqa: BLE001 — same defensive rationale as
+            # /new-client/stream: any unexpected crash becomes a diagnosable
+            # final event instead of the connection dying mid-stream.
+            yield {"type": "done", "ok_count": 0, "fail_count": len(clients),
+                   "error": f"unexpected error ({type(exc).__name__}): {exc}"}
+
+    return _ndjson(gen())
 
 
 @router.post("/fetch-token")
@@ -535,6 +607,7 @@ class OnboardingIn(BaseModel):
     hostname: str = ""
     template_client_name: str = ""
     notes: str = ""
+    medical: bool = False
 
 
 class StepRunIn(BaseModel):
@@ -586,6 +659,15 @@ def _primary_remote_dir() -> str:
     return caddyfile_path.rsplit("/deploy/Caddyfile", 1)[0] if caddyfile_path else ""
 
 
+@router.get("/client-names")
+def client_names() -> list[str]:
+    """Just the configured client names, instantly — for dropdowns. The full
+    GET /api/clients runs live health checks over SSH/HTTPS and takes
+    seconds; a <select> racing that fetch is how a form once showed
+    '(no clients yet)' next to a dashboard showing four."""
+    return [c.get("name", "") for c in cfg.load_clients() if c.get("name")]
+
+
 @router.get("/onboardings")
 def list_onboardings() -> list[dict[str, Any]]:
     return [onboarding_mod.summary(r) for r in onboarding_mod.load_all()]
@@ -614,20 +696,30 @@ def upsert_onboarding(body: OnboardingIn) -> dict[str, Any]:
         if host_error:
             raise HTTPException(status_code=400, detail=host_error)
     record = onboarding_mod.load(body.deploy_name)
-    bundle = {
-        "deploy_name": body.deploy_name,
-        "display_name": body.display_name.strip() or body.deploy_name,
-        "hostname": hostname,
-        "template_client_name": body.template_client_name.strip(),
-        "notes": body.notes,
-    }
+    # Only NON-EMPTY submitted values overwrite what's saved — a re-submitted
+    # form with a blank/unloaded field (e.g. the template dropdown racing the
+    # client-list fetch, 2026-07-19 incident) must never wipe a good value.
+    updates = {"deploy_name": body.deploy_name}
+    if body.display_name.strip():
+        updates["display_name"] = body.display_name.strip()
+    if hostname:
+        updates["hostname"] = hostname
+    if body.template_client_name.strip():
+        updates["template_client_name"] = body.template_client_name.strip()
+    if body.notes:
+        updates["notes"] = body.notes
+    updates["medical"] = bool(body.medical)
     if record is None:
+        bundle = {"display_name": body.deploy_name, "hostname": "",
+                  "template_client_name": "", "notes": ""}
+        bundle.update(updates)
         record = onboarding_mod.new_record(bundle)
         onboarding_mod.save(record)
     else:
-        record["bundle"].update(bundle)
+        record["bundle"].update(updates)
         onboarding_mod.save(record)
-    complete = bool(bundle["hostname"] and bundle["template_client_name"])
+    saved = (onboarding_mod.load(body.deploy_name) or {}).get("bundle", {})
+    complete = bool(saved.get("hostname") and saved.get("template_client_name"))
     onboarding_mod.set_step(body.deploy_name, "intake",
                             "ok" if complete else "pending",
                             "intake saved" if complete else "hostname/template still missing")
@@ -683,7 +775,8 @@ def run_onboarding_step(deploy_name: str, step_id: str, body: StepRunIn | None =
                     display = bundle.get("display_name") or deploy_name
                     provision_result = None
                     for ev in new_client_mod.create_new_client_stream(
-                            ssh_target, deploy_name, bundle.get("hostname", ""), display, tdir):
+                            ssh_target, deploy_name, bundle.get("hostname", ""), display, tdir,
+                            medical=bool(bundle.get("medical", False))):
                         if ev.get("type") == "result":
                             provision_result = ev
                         else:
@@ -771,6 +864,34 @@ def run_onboarding_step(deploy_name: str, step_id: str, body: StepRunIn | None =
                 if client is None:
                     detail = "client not registered yet — run the provision step first"
                 else:
+                    # Readiness gate (2026-07-19): the credentials step recreates
+                    # the app container and uvicorn needs ~30-60s to boot. Running
+                    # the smoke suite before it listens produced 6 false FAILs on
+                    # a perfectly healthy deploy. So: wait for /health to answer
+                    # on the loopback port first, with a visible countdown, and
+                    # only then run the checks.
+                    r_target = client.get("ssh_target", "")
+                    r_port = client.get("admin_local_port")
+                    if r_target and r_port:
+                        yield {"type": "log",
+                               "line": "waiting for the app to come up (it restarts after the credentials step — up to 2 minutes)…"}
+                        ready = False
+                        for attempt in range(24):
+                            r_ok, r_out = core.run_ssh(
+                                r_target,
+                                f"curl -fsS -m 8 http://127.0.0.1:{int(r_port)}/health",
+                                timeout=20)
+                            if r_ok and '"status"' in r_out:
+                                ready = True
+                                yield {"type": "log",
+                                       "line": f"app is up (after ~{attempt * 5}s) — running checks now"}
+                                break
+                            yield {"type": "log",
+                                   "line": f"  not answering yet — retrying in 5s ({attempt + 1}/24)"}
+                            time.sleep(5)
+                        if not ready:
+                            yield {"type": "log",
+                                   "line": "app did not come up within 2 minutes — running the checks anyway so the failure details are visible"}
                     yield {"type": "log", "line": "$ running smoke suite…"}
                     rows = smoke_mod.run_smoke(client)
                     for r in rows:
@@ -782,18 +903,27 @@ def run_onboarding_step(deploy_name: str, step_id: str, body: StepRunIn | None =
                         caddy_gate = new_client_mod.caddyfile_git_status(
                             client.get("ssh_target", ""), primary)
                     yield {"type": "log", "line": f"Caddyfile git status: {caddy_gate.get('detail')}"}
+                    # Verify goes red ONLY for things that affect the client
+                    # actually working. Housekeeping (backup timer, Caddyfile
+                    # git state) is reported as warnings, never as failure —
+                    # per the 2026-07-19 acceptance bar: a clean deploy shows
+                    # NO red. (Caddyfile commit is auto-attempted at wiring
+                    # time now; see wire_caddy_stream.)
                     critical = [r for r in rows if r["check"] != "backup_timer"]
                     warn_rows = [r for r in rows if r["check"] == "backup_timer" and not r["ok"]]
                     caddy_ok = bool(caddy_gate.get("clean")) and bool(caddy_gate.get("pushed"))
-                    ok = all(r["ok"] for r in critical) and caddy_ok
+                    ok = all(r["ok"] for r in critical)
                     parts = []
-                    if not all(r["ok"] for r in critical):
+                    if not ok:
                         parts.append(f"{sum(1 for r in critical if not r['ok'])} smoke check(s) failing")
+                    warnings = []
                     if not caddy_ok:
-                        parts.append(f"Caddyfile: {caddy_gate.get('detail')}")
+                        warnings.append(f"Caddyfile {caddy_gate.get('detail')}")
                     if warn_rows:
-                        parts.append("backup timer not active (warning)")
-                    detail = "all green" if ok and not warn_rows else ("; ".join(parts) or "all green")
+                        warnings.append("backup timer not installed")
+                    detail = ("all green" if ok and not warnings
+                              else ("; ".join(parts) if not ok
+                                    else "working — housekeeping notes: " + "; ".join(warnings)))
         except Exception as exc:  # noqa: BLE001 — a step crash must land in the record, not a 500
             ok, detail = False, f"unexpected error ({type(exc).__name__}): {exc}"
             yield {"type": "log", "line": detail}
@@ -838,15 +968,10 @@ def teardown_onboarding(deploy_name: str, body: TeardownIn):
             display = bundle.get("display_name") or deploy_name
             clients = [c for c in cfg.load_clients() if c.get("name") != display]
             cfg.save_clients(clients)
-            rec = onboarding_mod.load(deploy_name)
-            if rec:
-                rec["torn_down"] = True
-                for sid in onboarding_mod.STEP_IDS:
-                    if sid != "intake":
-                        rec["steps"][sid] = {"status": "pending", "detail": "reset by teardown",
-                                             "updated": rec["steps"].get(sid, {}).get("updated")}
-                onboarding_mod.save(rec)
-            yield {"type": "log", "line": f"removed {display!r} from clients.json; record kept (torn down)"}
+            # Removed means GONE (2026-07-19): no residual half-done card.
+            # A fresh deploy starts from a fresh form, full stop.
+            onboarding_mod._path(deploy_name).unlink(missing_ok=True)
+            yield {"type": "log", "line": f"removed {display!r} everywhere - monitoring, records, all of it"}
         yield {"type": "result", "ok": final.get("ok", False), "error": final.get("error")}
 
     return _ndjson(gen())

@@ -226,6 +226,7 @@ function renderTable() {
   const tbody = $("clientTableBody");
   if (latestResults.length === 0) {
     tbody.innerHTML = `<tr><td colspan="8" class="empty">No clients configured yet — click "Add client" to start monitoring one.</td></tr>`;
+    renderUpdatesPage();
     return;
   }
   tbody.innerHTML = latestResults
@@ -247,6 +248,7 @@ function renderTable() {
     row.addEventListener("click", () => openDetail(row.dataset.name));
   });
   renderImpactPanel();
+  renderUpdatesPage();
 }
 
 function renderImpactPanel() {
@@ -1150,14 +1152,14 @@ document.addEventListener("DOMContentLoaded", () => {
   $("detailRefreshBtn").addEventListener("click", refreshOneDetail);
   $("detailEditBtn").addEventListener("click", openEditModal);
   $("detailDeleteBtn").addEventListener("click", deleteCurrentClient);
-  $("credsBtn").addEventListener("click", () => openCredsModal());
+
   $("credsLoadSourceBtn").addEventListener("click", loadCredsSource);
   $("credsLoadDestBtn").addEventListener("click", loadCredsDest);
   $("credsAddRowBtn").addEventListener("click", addCredsRow);
   $("credsWriteBtn").addEventListener("click", writeCredsEnv);
   wireCredsSelect("credsSource");
   wireCredsSelect("credsDest");
-  $("newClientBtn").addEventListener("click", openNewClientModal);
+
   $("newClientForm").addEventListener("submit", submitNewClientForm);
   [...document.querySelectorAll("[data-close]")].forEach((btn) => {
     btn.addEventListener("click", () => hide(btn.dataset.close));
@@ -1179,7 +1181,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 // -- tab navigation ----------------------------------------------------------
 
-const PAGES = ["dashboard", "onboarding", "credentials", "host"];
+const PAGES = ["dashboard", "updates", "onboarding", "credentials", "host"];
 
 function switchPage(page) {
   PAGES.forEach((p) => {
@@ -1189,6 +1191,7 @@ function switchPage(page) {
   document.querySelectorAll("#mainTabs .tab").forEach((btn) => {
     btn.classList.toggle("active", btn.dataset.page === page);
   });
+  if (page === "updates") renderUpdatesPage();
   if (page === "onboarding") { refreshOnboardings(); populateObTemplateSelect(); }
   if (page === "credentials") { refreshVault(); populateVaultClientSelect(); }
 }
@@ -1206,12 +1209,15 @@ async function fetchObSteps() {
   return obSteps;
 }
 
-function populateObTemplateSelect() {
+async function populateObTemplateSelect() {
   const sel = $("obTemplateSelect");
   if (!sel) return;
-  sel.innerHTML = latestResults.map((c) =>
-    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join("") ||
+  const prev = sel.value;
+  const names = await (await fetch("/api/client-names")).json().catch(() => []);
+  sel.innerHTML = (names || []).map((n) =>
+    `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("") ||
     `<option value="">(no clients yet — register/monitor one first)</option>`;
+  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
 }
 
 async function refreshOnboardings() {
@@ -1440,6 +1446,7 @@ async function submitObForm(e) {
   e.preventDefault();
   const fd = new FormData(e.target);
   const body = Object.fromEntries(fd.entries());
+  body.medical = fd.get("medical") === "true";   // unchecked checkbox = absent = false
   const r = await fetch("/api/onboardings", {
     method: "POST", headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body) });
@@ -1457,30 +1464,74 @@ async function submitObForm(e) {
   runObRemaining();
 }
 
+let obTearingDown = false;
+
 async function teardownCurrent() {
+  if (obTearingDown) return;
   const confirmVal = $("obTeardownConfirm").value.trim();
   if (confirmVal !== obCurrent) {
     alert("Type the deploy name exactly to confirm teardown.");
     return;
   }
+  obTearingDown = true;
+  const goBtn = $("obTeardownGo");
+  goBtn.disabled = true;
   const consoleEl = $("obConsole");
-  consoleEl.textContent = "— teardown —\n";
+  // The old version buffered the WHOLE response before printing anything, so
+  // for the 1-2 minutes the real teardown takes, the screen showed one header
+  // line and nothing else — indistinguishable from "broken" (2026-07-19).
+  // Now: stream line by line, exactly like the step runner does.
+  consoleEl.textContent = "— teardown — (removing containers, files and web address; takes a minute or two)\n";
   show("obConsole");
-  const resp = await fetch(`/api/onboardings/${encodeURIComponent(obCurrent)}/teardown`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ confirm: confirmVal }) });
-  const text = await resp.text();
-  for (const line of text.trim().split("\n")) {
-    try {
-      const ev = JSON.parse(line);
-      consoleEl.textContent += (ev.type === "log" ? ev.line
-        : ev.ok ? "✔ teardown complete" : `✘ ${ev.error}`) + "\n";
-    } catch { /* ignore */ }
+  let finalOk = false;
+  try {
+    const resp = await fetch(`/api/onboardings/${encodeURIComponent(obCurrent)}/teardown`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: confirmVal }) });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      consoleEl.textContent += `✘ ${err.detail || `server answered ${resp.status}`}\n`;
+    } else {
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+        for (const line of lines) {
+          if (!line.trim()) continue;
+          let ev;
+          try { ev = JSON.parse(line); } catch { continue; }
+          if (ev.type === "log") {
+            consoleEl.textContent += ev.line + "\n";
+            consoleEl.scrollTop = consoleEl.scrollHeight;
+          } else if (ev.type === "result") {
+            finalOk = !!ev.ok;
+            consoleEl.textContent += finalOk
+              ? "✔ teardown complete\n"
+              : `✘ teardown failed: ${ev.error || "see log above"}\n`;
+          }
+        }
+      }
+    }
+  } catch (e) {
+    consoleEl.textContent += `✘ request failed: ${e}\n`;
   }
-  hide("obTeardownConfirm"); hide("obTeardownGo");
-  await renderStepper();
-  await refreshOnboardings();
-  refreshClients();
+  obTearingDown = false;
+  goBtn.disabled = false;
+  if (finalOk) {
+    hide("obTeardownConfirm"); hide("obTeardownGo");
+    // the record no longer exists — close the detail panel and clear the list
+    obCurrent = null;
+    hide("obDetail");
+    await refreshOnboardings();
+    refreshClients();
+  }
+  // on failure: everything stays on screen — the error line says what to fix,
+  // and the Confirm button is live again for one retry.
 }
 
 // -- credentials vault -------------------------------------------------------
@@ -1528,11 +1579,14 @@ async function refreshVault() {
   });
 }
 
-function populateVaultClientSelect() {
+async function populateVaultClientSelect() {
   const sel = $("vaultClientSelect");
   if (!sel) return;
-  sel.innerHTML = latestResults.map((c) =>
-    `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join("");
+  const prev = sel.value;
+  const names = await (await fetch("/api/client-names")).json().catch(() => []);
+  sel.innerHTML = (names || []).map((n) =>
+    `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
+  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
 }
 
 async function submitVaultForm(e) {
@@ -1637,21 +1691,6 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("#mainTabs .tab").forEach((btn) => {
     btn.addEventListener("click", () => switchPage(btn.dataset.page));
   });
-  // Header shortcuts land on the matching page. The buttons already have
-  // modal-opening listeners from the original DOMContentLoaded handler
-  // (which ran before this one — registration order); at the target
-  // element, capture/bubble listeners all fire in registration order, so
-  // stopImmediatePropagation could never suppress them from here. Cloning
-  // the node strips the old anonymous listeners cleanly instead. The old
-  // modals stay reachable: provisioning now lives in the stepper's
-  // provision step; the legacy .env copy tool via its button on the
-  // Credentials page.
-  for (const [btnId, page] of [["newClientBtn", "onboarding"], ["credsBtn", "credentials"]]) {
-    const oldBtn = $(btnId);
-    const fresh = oldBtn.cloneNode(true);
-    oldBtn.replaceWith(fresh);
-    fresh.addEventListener("click", () => switchPage(page));
-  }
   $("openLegacyCredsBtn").addEventListener("click", () => openCredsModal());
 
   $("obForm").addEventListener("submit", submitObForm);
@@ -1679,4 +1718,284 @@ document.addEventListener("DOMContentLoaded", () => {
   $("smokeRunBtn").addEventListener("click", runSmokeFromDetail);
   $("validateCfgBtn").addEventListener("click", validateCfgFromDetail);
   renderVaultFields();
+});
+
+// ===========================================================================
+// Updates tab — batch "commit updates" across the whole fleet. One window
+// showing every client that's behind origin/master (with the actual pending
+// commits, not just a count), select some or all, one typed confirmation
+// ("update <N>"), then a single streamed run with a live per-client status
+// column + console — instead of opening each client's detail modal, typing
+// its name, deploying, waiting, and moving on to the next one by hand.
+// Talks to POST /api/deploy-batch (NDJSON stream; parallel across hosts,
+// sequential per host). Reuses $ / show / hide / escapeHtml / latestResults.
+// ===========================================================================
+
+let updSelected = new Set();   // client names checked in the Updates table
+let updRunState = {};          // name -> {state: queued|running|ok|fail, stage, commit, error}
+let updRunning = false;
+
+// Rows shown in the table: behind > 0, OR touched by the current/last run
+// (so a freshly updated client's ✔ row doesn't vanish mid-view the moment a
+// background poll notices it's no longer behind).
+function updEligibleRows() {
+  return latestResults.filter((r) =>
+    (r.version && r.version.ok && (r.version.behind || 0) > 0) ||
+    Object.prototype.hasOwnProperty.call(updRunState, r.name));
+}
+
+function updBehindRows() {
+  return latestResults.filter((r) => r.version && r.version.ok && (r.version.behind || 0) > 0);
+}
+
+function updStatusCell(name) {
+  const s = updRunState[name];
+  if (!s) return `<span class="muted">—</span>`;
+  if (s.state === "queued") return `<span class="muted">queued…</span>`;
+  if (s.state === "running") return `<span class="upd-running">⟳ updating…</span>`;
+  if (s.state === "ok") return `<span class="smoke-ok">✔ updated${s.commit ? " → " + escapeHtml(s.commit) : ""}</span>`;
+  return `<span class="smoke-fail" title="${escapeHtml(s.error || "")}">✘ failed (${escapeHtml(s.stage || "?")} stage)</span>`;
+}
+
+function renderUpdatesPage() {
+  const tbody = $("updTableBody");
+  if (!tbody) return;
+
+  // Tab badge: how many clients need updates, visible from any tab.
+  const behindCount = updBehindRows().length;
+  const badge = $("updTabBadge");
+  if (badge) {
+    badge.textContent = behindCount || "";
+    badge.classList.toggle("hidden", !behindCount);
+  }
+
+  const rows = updEligibleRows();
+  const listed = new Set(rows.map((r) => r.name));
+  updSelected = new Set([...updSelected].filter((n) => listed.has(n)));
+
+  // Remember which per-row commit lists are expanded — this table is
+  // re-rendered on every background poll, which would otherwise snap an
+  // open <details> shut while you're reading it.
+  const openDetails = new Set(
+    [...tbody.querySelectorAll("details[open][data-name]")].map((d) => d.dataset.name));
+
+  if (rows.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="7" class="empty">${
+      latestResults.length
+        ? "Everything is up to date — no client is behind origin/master."
+        : "No clients configured yet — nothing to update."
+    }</td></tr>`;
+  } else {
+    tbody.innerHTML = rows.map((r) => {
+      const v = r.version || {};
+      const behind = v.behind || 0;
+      const checked = updSelected.has(r.name) ? "checked" : "";
+      const disabled = updRunning || !behind ? "disabled" : "";
+      const infraBadge = v.infra_risk
+        ? `<span class="upd-infra" title="This range touches docker-compose/Dockerfile/deploy files — review before updating: ${escapeHtml((v.infra_files || []).join(", "))}">⚠ infra</span>`
+        : "";
+      const commitLines = (v.behind_commits || []).map((l) => `<li>${escapeHtml(l)}</li>`).join("");
+      const moreNote = behind > (v.behind_commits || []).length
+        ? `<p class="muted">…and ${behind - v.behind_commits.length} more not shown.</p>` : "";
+      const pendingCell = behind
+        ? `<details class="upd-commits" data-name="${escapeHtml(r.name)}"${openDetails.has(r.name) ? " open" : ""}>
+             <summary>${behind} commit${behind === 1 ? "" : "s"}</summary>
+             <ul class="behind-commits">${commitLines}</ul>${moreNote}
+           </details>`
+        : `<span class="muted">up to date</span>`;
+      return `<tr>
+        <td><input type="checkbox" class="upd-check" data-name="${escapeHtml(r.name)}" ${checked} ${disabled} /></td>
+        <td><a href="#" class="upd-name" data-name="${escapeHtml(r.name)}">${escapeHtml(r.name)}</a></td>
+        <td><code>${escapeHtml(v.commit || "?")}</code></td>
+        <td>${behind ? behind : `<span class="muted">0</span>`} ${infraBadge}</td>
+        <td>${pendingCell}</td>
+        <td>${updStatusCell(r.name)}</td>
+        <td><button type="button" class="upd-row-btn icon-btn" data-name="${escapeHtml(r.name)}" ${updRunning ? "disabled" : ""}>Update</button></td>
+      </tr>`;
+    }).join("");
+
+    [...tbody.querySelectorAll(".upd-check")].forEach((cb) => {
+      cb.addEventListener("change", () => {
+        if (cb.checked) updSelected.add(cb.dataset.name);
+        else updSelected.delete(cb.dataset.name);
+        updSyncToolbar();
+      });
+    });
+    [...tbody.querySelectorAll(".upd-row-btn")].forEach((btn) => {
+      btn.addEventListener("click", () => showUpdConfirm([btn.dataset.name]));
+    });
+    [...tbody.querySelectorAll(".upd-name")].forEach((el) => {
+      el.addEventListener("click", (e) => { e.preventDefault(); openDetail(el.dataset.name); });
+    });
+  }
+
+  const othersEl = $("updOthers");
+  if (othersEl) {
+    const upToDate = latestResults.filter((r) =>
+      r.version && r.version.ok && !(r.version.behind || 0) &&
+      !Object.prototype.hasOwnProperty.call(updRunState, r.name)).length;
+    const unknown = latestResults.filter((r) => !r.version || !r.version.ok).length;
+    const parts = [];
+    if (upToDate) parts.push(`${upToDate} client(s) already up to date`);
+    if (unknown) parts.push(`${unknown} unreachable/unknown (no SSH check — see Dashboard)`);
+    othersEl.textContent = parts.length ? `Not listed: ${parts.join("; ")}.` : "";
+  }
+
+  updSyncToolbar();
+}
+
+function updSyncToolbar() {
+  const btn = $("updUpdateSelectedBtn");
+  if (!btn) return;
+  btn.disabled = updRunning || updSelected.size === 0;
+  btn.textContent = updSelected.size ? `Update selected (${updSelected.size})` : "Update selected";
+  $("updSelectAllBtn").disabled = updRunning;
+  $("updSelectNoneBtn").disabled = updRunning;
+  $("updRefreshBtn").disabled = updRunning;
+  $("updClearBtn").classList.toggle("hidden", updRunning || !Object.keys(updRunState).length);
+  $("updSummary").textContent = updRunning ? "updating — watch the console below" : "";
+}
+
+function showUpdConfirm(names) {
+  if (updRunning || !names.length) return;
+  const area = $("updConfirmArea");
+  const phrase = `update ${names.length}`;
+  const infraNames = names.filter((n) => {
+    const r = latestResults.find((x) => x.name === n);
+    return r && r.version && r.version.infra_risk;
+  });
+  const infraNotice = infraNames.length
+    ? `<p class="infra-warning">⚠ ${infraNames.length} of these (${infraNames.map(escapeHtml).join(", ")})
+        include infrastructure-file changes (docker-compose / Dockerfile / deploy/**) — worth actually
+        looking at those commits first. The per-client pre-flight check still refuses container-name
+        collisions, but that's the only class of infra problem it catches.</p>`
+    : "";
+  area.innerHTML = `
+    <div class="deploy-confirm">
+      <p class="muted">About to update <strong>${names.length}</strong> client(s):
+        <strong>${names.map(escapeHtml).join(", ")}</strong>. Each one runs the same guarded pipeline as
+        the individual Deploy button (<code>git pull --ff-only</code> → build → collision precheck →
+        restart) — parallel across VPSes, strictly one at a time per VPS. A failure on one client never
+        stops the others.</p>
+      ${infraNotice}
+      <label>Type "<strong>${phrase}</strong>" to confirm:
+        <input id="updConfirmInput" type="text" autocomplete="off" spellcheck="false" />
+      </label>
+      <div class="modal-actions">
+        <button id="updConfirmGoBtn" type="button" class="danger" disabled>Update ${names.length} client(s)</button>
+        <button id="updConfirmCancelBtn" type="button">Cancel</button>
+      </div>
+    </div>`;
+  show("updConfirmArea");
+  const input = $("updConfirmInput");
+  const goBtn = $("updConfirmGoBtn");
+  input.addEventListener("input", () => {
+    goBtn.disabled = input.value.trim().toLowerCase() !== phrase;
+  });
+  input.focus();
+  goBtn.addEventListener("click", () => startBatchUpdate(names));
+  $("updConfirmCancelBtn").addEventListener("click", () => hide("updConfirmArea"));
+}
+
+function updConsoleLine(text) {
+  const el = $("updConsole");
+  el.textContent += text + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+
+function handleUpdEvent(ev) {
+  if (ev.type === "start") {
+    updRunState[ev.name] = { state: "running" };
+    updConsoleLine(`▶ ${ev.name}: updating (pull → build → precheck → restart)…`);
+  } else if (ev.type === "result") {
+    if (ev.ok) {
+      updRunState[ev.name] = { state: "ok", commit: ev.commit };
+      updConsoleLine(`✔ ${ev.name}: updated${ev.commit ? ", now at " + ev.commit : ""}`);
+    } else {
+      updRunState[ev.name] = { state: "fail", stage: ev.stage, error: ev.error };
+      updConsoleLine(`✘ ${ev.name}: FAILED at the ${ev.stage || "?"} stage — ${ev.error || "no error text"}`);
+      const tail = (ev.output || "").split("\n").slice(-12).map((l) => "    " + l).join("\n");
+      if (tail.trim()) updConsoleLine(tail);
+    }
+  } else if (ev.type === "done") {
+    updConsoleLine(`— done: ${ev.ok_count} ok, ${ev.fail_count} failed —`);
+    if (ev.error) updConsoleLine(`✘ ${ev.error}`);
+  }
+  renderUpdatesPage();
+}
+
+async function startBatchUpdate(names) {
+  if (updRunning || !names.length) return;
+  updRunning = true;
+  updRunState = {};
+  names.forEach((n) => { updRunState[n] = { state: "queued" }; });
+  hide("updConfirmArea");
+  const consoleEl = $("updConsole");
+  consoleEl.textContent = "";
+  show("updConsole");
+  updConsoleLine(`— updating ${names.length} client(s): ${names.join(", ")} —`);
+  renderUpdatesPage();
+  try {
+    const resp = await fetch("/api/deploy-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names, confirm: `update ${names.length}` }),
+    });
+    if (!resp.ok) {
+      // Precondition failures (bad name, etc.) come back as plain JSON
+      // before any streaming starts — nothing was deployed.
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `server answered ${resp.status}`);
+    }
+    if (!resp.body) throw new Error("this browser doesn't support streaming responses");
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        handleUpdEvent(ev);
+      }
+    }
+  } catch (e) {
+    updConsoleLine(`✘ batch request failed: ${e.message || e}`);
+    Object.keys(updRunState).forEach((n) => {
+      const s = updRunState[n];
+      if (s.state === "queued" || s.state === "running") {
+        updRunState[n] = { state: "fail", stage: "request", error: String(e.message || e) };
+      }
+    });
+  }
+  updRunning = false;
+  updSelected.clear();
+  renderUpdatesPage();
+  // Pull fresh statuses right away so behind-counts reflect the run instead
+  // of waiting for the next poll tick.
+  refreshClients();
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  $("updRefreshBtn").addEventListener("click", refreshClients);
+  $("updSelectAllBtn").addEventListener("click", () => {
+    updBehindRows().forEach((r) => updSelected.add(r.name));
+    renderUpdatesPage();
+  });
+  $("updSelectNoneBtn").addEventListener("click", () => {
+    updSelected.clear();
+    renderUpdatesPage();
+  });
+  $("updUpdateSelectedBtn").addEventListener("click", () => showUpdConfirm([...updSelected]));
+  $("updClearBtn").addEventListener("click", () => {
+    if (updRunning) return;
+    updRunState = {};
+    hide("updConsole");
+    renderUpdatesPage();
+  });
 });

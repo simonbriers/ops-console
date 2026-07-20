@@ -178,7 +178,7 @@ def _generate_override_yaml(container_name: str, port: int) -> str:
     )
 
 
-def _generate_starter_site_config(display_name: str) -> str:
+def _generate_starter_site_config(display_name: str, medical: bool = False) -> str:
     """A minimal, valid site_config.yaml — passes deploy/validate_site_config.py's
     checks (required top-level keys, non-empty consultants/services, quoted
     hours) with obviously-placeholder content, meant to be replaced via the
@@ -237,6 +237,11 @@ site:
   name: "{safe_name}"
   phone: "+00 000 000 000"
   email: "placeholder@example.com"
+  language: "en"
+  # Asked at intake (2026-07-19): clients handling medical/patient data get
+  # the backend's strict EU rules; everyone else explicitly opts out — the
+  # backend treats an ABSENT key as strict, so this must always be written.
+  eu_medical_data_protection: {str(medical).lower()}
   timezone: "Europe/Madrid"
   business_type: "general business"
   disclose_prices: false
@@ -260,8 +265,11 @@ voice:
     provider: mistral
     model: voxtral-mini-transcribe-realtime-2602
   tts:
-    provider: google
-    credentials_path: google_tts.json
+    # piper: EU-approved, needs no credentials, sane built-in voices — the
+    # shipped default 'google' is a documented dev-only stopgap that FAILS
+    # the production boot guard (MULTI_CLINIC_ONBOARDING.md #1) and failed
+    # the onboarding config check live on 2026-07-19. Never generate it.
+    provider: piper
   max_session_minutes: 15
   max_turns_unverified: 6
   max_turns_verified: 25
@@ -309,6 +317,7 @@ def _generate_placeholder_env(deploy_name: str, hostname: str) -> tuple[str, str
 
 def create_new_client_stream(
     ssh_target: str, deploy_name: str, hostname: str, display_name: str, template_remote_dir: str,
+    medical: bool = False,
 ):
     """Generator variant of create_new_client — the actual implementation.
     Runs the exact same provisioning pipeline (clone -> write override/.env/
@@ -395,7 +404,7 @@ def create_new_client_stream(
     yield {"type": "log", "line": f"  port = {port}"}
 
     override_yaml = _generate_override_yaml(deploy_name, port)
-    site_config_yaml = _generate_starter_site_config(display_name)
+    site_config_yaml = _generate_starter_site_config(display_name, medical)
     env_content, admin_password, backup_passphrase = _generate_placeholder_env(deploy_name, hostname)
 
     override_b64 = base64.b64encode(override_yaml.encode("utf-8")).decode("ascii")
@@ -560,6 +569,18 @@ def wire_caddy_stream(ssh_target: str, primary_remote_dir: str, hostname: str, p
         yield {"type": "result", "ok": False, "error": "add_clinic_site.sh reported a failure (see output)",
                "output": output.strip()[-_OUTPUT_CHAR_LIMIT:]}
         return
+    # Auto-commit the appended block so the Caddyfile can't drift from git
+    # again (the PrimeConnect block sat uncommitted for two days; the manual
+    # "please commit this" instruction was proven to be skipped). Best-effort:
+    # a read-only deploy key just leaves a note, never fails the wiring.
+    commit_cmd = (
+        f"cd {shell_dir} && git add deploy/Caddyfile && "
+        f"(git diff --cached --quiet || git commit -m 'deploy: add {label} Caddy site block (auto)') 2>&1; "
+        "git push origin master 2>&1 || echo push-failed-commit-is-local-only"
+    )
+    ok2, out2 = run_ssh(ssh_target, commit_cmd, timeout=60)
+    last = out2.strip().splitlines()[-1] if out2.strip() else "done"
+    yield {"type": "log", "line": "auto-committing Caddyfile: " + last}
     yield {"type": "result", "ok": True, "error": None, "output": output.strip()[-_OUTPUT_CHAR_LIMIT:]}
 
 

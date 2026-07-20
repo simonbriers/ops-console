@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import queue
 import shlex
 import re
 import subprocess
@@ -47,6 +48,9 @@ HTTP_TIMEOUT = 10
 SSH_TIMEOUT = 20
 DEPLOY_TIMEOUT = 300  # a docker compose build can genuinely take minutes
 MAX_PARALLEL_CHECKS = 8
+# Batch updates deploy at most this many HOSTS at once. Within one host,
+# deploys are strictly sequential — see deploy_batch_stream's docstring.
+MAX_PARALLEL_DEPLOY_HOSTS = 3
 
 # The literal placeholder shipped in clients.example.json. If a client still
 # has this value (never replaced with a real token, e.g. right after a fresh
@@ -578,6 +582,72 @@ def restart_container(ssh_target: str, remote_dir: str) -> dict[str, Any]:
     if not ok:
         return {"ok": False, "error": output.strip()[-1000:] or "ssh failed"}
     return {"ok": True, "error": None, "output": output.strip()[-2000:]}
+
+
+def deploy_batch_stream(clients: list[dict[str, Any]]):
+    """Deploys several clients in one run, yielding progress events as they
+    happen (a generator, so the API layer can stream them live):
+
+      {"type": "start",  "name": ...}                          one per client
+      {"type": "result", "name": ..., <deploy_client fields>}  one per client
+      {"type": "done",   "ok_count": N, "fail_count": M}       always last
+
+    Concurrency model: grouped by ssh_target — clients on DIFFERENT hosts
+    deploy in parallel (capped at MAX_PARALLEL_DEPLOY_HOSTS), but clients
+    SHARING a host deploy strictly one at a time. A `docker compose build`
+    is genuinely heavy for a small VPS (CPU/RAM/disk all at once), and the
+    clients most likely to be batch-updated together are exactly the ones
+    sharing a box — kicking off several builds on one host simultaneously
+    is how a routine update becomes an outage. Per-client safety is
+    unchanged: every deploy still goes through deploy_client() with all of
+    its gates (ff-only pull, build-before-restart, the container-name
+    collision precheck).
+
+    Never raises, and can never hang the stream: deploy_client itself never
+    raises, and the worker wraps it anyway so an unforeseen bug still emits
+    a failed result event for that client instead of silently eating it
+    (the generator counts result events to know when it's finished)."""
+    if not clients:
+        yield {"type": "done", "ok_count": 0, "fail_count": 0}
+        return
+
+    events: queue.Queue[dict[str, Any]] = queue.Queue()
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for idx, client in enumerate(clients):
+        # A client with no ssh_target still gets its own group so it flows
+        # through deploy_client and comes back as a normal per-client config
+        # error, never a silent skip.
+        key = client.get("ssh_target") or f"__no-ssh-target-{idx}"
+        groups.setdefault(key, []).append(client)
+
+    def run_group(group: list[dict[str, Any]]) -> None:
+        for client in group:
+            name = client.get("name") or client.get("base_url") or "?"
+            events.put({"type": "start", "name": name})
+            try:
+                result = deploy_client(client)
+            except Exception as exc:  # noqa: BLE001 — see docstring
+                result = {"ok": False, "stage": "internal",
+                          "error": f"unexpected error ({type(exc).__name__}): {exc}",
+                          "output": "", "commit": None}
+            events.put({"type": "result", "name": name, **result})
+
+    ok_count = 0
+    fail_count = 0
+    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL_DEPLOY_HOSTS, len(groups))) as pool:
+        for group in groups.values():
+            pool.submit(run_group, group)
+        results_seen = 0
+        while results_seen < len(clients):
+            event = events.get()
+            if event.get("type") == "result":
+                results_seen += 1
+                if event.get("ok"):
+                    ok_count += 1
+                else:
+                    fail_count += 1
+            yield event
+    yield {"type": "done", "ok_count": ok_count, "fail_count": fail_count}
 
 
 # --------------------------------------------------------------------------

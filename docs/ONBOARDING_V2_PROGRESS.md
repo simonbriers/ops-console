@@ -22,8 +22,26 @@ step actually works, and continues from the first non-done row. Statuses:
 | 12 | Frontend: vault UI (sets CRUD, import from client, apply to client) | same | done (2026-07-19) |
 | 13 | Frontend: smoke checklist in client detail + validate-config button | same | done (2026-07-19) |
 | 14 | Caddyfile commit-back gate after wiring | `backend/new_client.py`, surfaced in verify step | done (2026-07-19) |
-| 15 | End-to-end test with a throwaway client (`test-onboarding`), then teardown via its own button | — human step — | pending |
+| 15 | End-to-end test with a throwaway client (`acme`), then teardown via its own button | — human step — | done (2026-07-20) |
 | 16 | Phase 2: intake bundle form fields beyond basics (services CSV import, hours widget, SOUL templates, backup timers) | future session | pending |
+
+## Step 15 result (2026-07-20)
+
+Real run on the live VPS with client `acme` (acme.my-ai-receptionist.com,
+port 8003): three fields + medical checkbox → Deploy → all six steps green
+hands-off (DNS auto-retry, credentials auto-imported from template, config
+valid, verify 7/7 critical smoke checks PASS). Two housekeeping warnings by
+design: backup timer not installed; Caddyfile auto-commit stays local (the
+VPS deploy key is read-only, cannot push). Fixed along the way, both
+verified in the fake-VPS harness and then live:
+
+- verify readiness gate: the credentials step recreates the app container;
+  verify now polls loopback /health (5s interval, 2 min cap, visible
+  countdown) before running smoke — without it a healthy deploy showed 6
+  false FAILs.
+- teardown UI: was buffering the whole 1–2 min response before printing
+  anything (looked dead) and swallowed errors; now streams line by line,
+  reports failures as one sentence, leaves the Confirm button live to retry.
 
 ## Verification notes per landed step
 

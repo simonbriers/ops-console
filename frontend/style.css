@@ -233,3 +233,25 @@ form input { width: 100%; padding: 0.4rem 0.5rem; margin-top: 0.25rem; border: 1
 #obConsole { max-height: 320px; overflow: auto; }
 .host-compose { display: inline-flex; align-items: center; gap: 2px; }
 .host-suffix { opacity: .7; font-size: 13px; white-space: nowrap; }
+
+.tab-right { margin-left: auto; }
+.dash-toolbar { display: flex; gap: 8px; justify-content: flex-end; margin: 0 0 12px; }
+
+/* === Updates tab (batch commit updates) === */
+.upd-toolbar { display: flex; gap: 8px; align-items: center; margin: 0 0 12px; flex-wrap: wrap; }
+.upd-tab-badge { display: inline-flex; align-items: center; justify-content: center;
+  min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px;
+  background: var(--warn); color: #fff; font-size: 11px; font-weight: 700; vertical-align: 1px; }
+.upd-tab-badge.hidden { display: none; }
+#updTable tbody tr { cursor: default; }
+#updTable td { vertical-align: top; }
+#updTable input[type="checkbox"] { width: auto; }
+.upd-name { color: inherit; font-weight: 600; text-decoration: none; }
+.upd-name:hover { text-decoration: underline; }
+.upd-infra { font-size: 0.75rem; color: #7a5c00; background: #fff6e0; border: 1px solid var(--warn);
+  border-radius: 999px; padding: 0.05rem 0.45rem; white-space: nowrap; cursor: help; }
+.upd-commits summary { cursor: pointer; color: #444; font-size: 0.85rem; }
+.upd-commits summary:hover { color: #000; }
+.upd-running { color: var(--warn); font-weight: 600; }
+#updConfirmArea { margin: 0 0 12px; }
+#updConsole { max-height: 320px; }

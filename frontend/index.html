@@ -4,27 +4,24 @@
   <meta charset="utf-8" />
   <title>ops-console</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="/static/style.css?v=obv2-3" />
+  <link rel="stylesheet" href="/static/style.css?v=obv2-9" />
 </head>
 <body>
   <header>
     <h1>ops-console</h1>
     <div class="header-actions">
       <span id="statusBar" class="status-bar">Loading…</span>
-      <button id="refreshBtn">Refresh now</button>
-      <button id="newClientBtn" class="primary">Onboard new client</button>
-      <button id="credsBtn">Credentials</button>
-      <button id="settingsBtn">Settings</button>
-      <button id="addClientBtn">Register existing…</button>
     </div>
   </header>
 
   <main>
     <nav id="mainTabs" class="main-tabs">
       <button class="tab active" data-page="dashboard">Dashboard</button>
+      <button class="tab" data-page="updates">Updates <span id="updTabBadge" class="upd-tab-badge hidden"></span></button>
       <button class="tab" data-page="onboarding">Onboarding</button>
       <button class="tab" data-page="credentials">Credentials</button>
       <button class="tab" data-page="host">Host / VPS</button>
+      <button class="tab tab-right" id="settingsBtn">Settings</button>
     </nav>
 
     <div id="page-host" class="page hidden">
@@ -47,6 +44,10 @@
     </div><!-- /page-host -->
 
     <div id="page-dashboard" class="page">
+    <div class="dash-toolbar">
+      <button id="refreshBtn">Refresh now</button>
+      <button id="addClientBtn">Register existing instance…</button>
+    </div>
     <section id="impactPanel" class="impact-panel">
       <h3>This month, across every client</h3>
       <div id="impactCards" class="impact-cards"></div>
@@ -71,6 +72,37 @@
     </table>
     </div><!-- /page-dashboard -->
 
+    <div id="page-updates" class="page hidden">
+      <section class="ob-panel">
+        <h3>Commit updates</h3>
+        <p class="muted">Every client whose running checkout is behind <code>origin/master</code>, in one place —
+        select some or all and update them in one run instead of opening each instance. Parallel across
+        VPSes, one at a time per VPS (several simultaneous docker builds on one small box is how an update
+        becomes an outage). Each update is the exact same guarded pipeline as the per-client Deploy button:
+        <code>git pull --ff-only</code> → build → container-name collision precheck → restart, each stage
+        gating the next.</p>
+        <div class="upd-toolbar">
+          <button id="updRefreshBtn">Re-check now</button>
+          <button id="updSelectAllBtn">Select all</button>
+          <button id="updSelectNoneBtn">Deselect all</button>
+          <button id="updUpdateSelectedBtn" class="primary">Update selected</button>
+          <button id="updClearBtn" class="hidden">Clear results</button>
+          <span id="updSummary" class="muted"></span>
+        </div>
+        <div id="updConfirmArea" class="hidden"></div>
+        <table id="updTable">
+          <thead>
+            <tr><th></th><th>Client</th><th>Running</th><th>Behind</th><th>Pending commits</th><th>Status</th><th></th></tr>
+          </thead>
+          <tbody id="updTableBody">
+            <tr><td colspan="7" class="empty">Checking…</td></tr>
+          </tbody>
+        </table>
+        <p id="updOthers" class="muted"></p>
+        <pre id="updConsole" class="newclient-console hidden"></pre>
+      </section>
+    </div><!-- /page-updates -->
+
     <div id="page-onboarding" class="page hidden">
       <section class="ob-panel">
         <h3>Deploy a new client</h3>
@@ -82,6 +114,9 @@
           <label>Display name <input name="display_name" placeholder="Acme Dental" /></label>
           <label>Subdomain <span class="host-compose"><input name="hostname" id="obSubdomain" placeholder="acme" pattern="[a-z][a-z0-9-]*" /><span class="host-suffix">.my-ai-receptionist.com</span></span><span class="muted">just the first part — the domain is fixed and added automatically</span></label>
           <label>Same VPS as <select name="template_client_name" id="obTemplateSelect"></select></label>
+          <label class="ob-medical"><input type="checkbox" name="medical" value="true" />
+            Handles medical / patient data
+            <span class="muted">(on = strict EU rules incl. EU-only voice; off = standard GDPR)</span></label>
           <button type="submit" class="primary">Deploy</button>
         </form>
       </section>
@@ -355,6 +390,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=obv2-3"></script>
+  <script src="/static/app.js?v=obv2-9"></script>
 </body>
 </html>
