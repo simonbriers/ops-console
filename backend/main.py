@@ -22,6 +22,19 @@ app = FastAPI(title="ops-console")
 app.include_router(api_router)
 
 
+@app.on_event("startup")
+def _start_ledger_collector() -> None:
+    # Phase 2 (docs/TOKEN_ECONOMY_PLAN.md): background usage-snapshot
+    # collector — metering must not depend on a dashboard tab being open.
+    # Defensive import/start: a ledger problem must never stop the console
+    # from booting.
+    try:
+        from backend import ledger
+        ledger.start_collector()
+    except Exception:
+        pass
+
+
 @app.get("/health")
 def health() -> dict:
     # ops-console's own liveness check (used by its Dockerfile

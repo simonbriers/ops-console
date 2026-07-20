@@ -23,6 +23,7 @@ from backend import new_client as new_client_mod
 from backend import onboarding as onboarding_mod
 from backend import smoke as smoke_mod
 from backend import validator as validator_mod
+from backend import ledger as ledger_mod
 from backend import vault as vault_mod
 
 router = APIRouter(prefix="/api")
@@ -1242,4 +1243,87 @@ def client_apply_credentials(name: str, body: ApplyCredsIn) -> dict[str, Any]:
     client = cfg.find_client(name)
     if client is None:
         raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+    if ledger_mod.is_frozen(name):
+        # Rollout safety (TOKEN_ECONOMY_PLAN.md Part 5): frozen clients get
+        # no .env writes / container recreates — enforced in code, not by
+        # operator discipline. Read-only actions (reconcile, metering,
+        # Record-only assignments) stay allowed.
+        raise HTTPException(status_code=423,
+                            detail=f"{name} is FROZEN (Tokens tab) — applying credentials "
+                                   "recreates its container. Unfreeze it first, or use Record only.")
     return vault_mod.apply_sets(client, body.set_ids)
+
+
+# --- metering ledger (Phase 2) ---------------------------------------------
+
+class PlanIn(BaseModel):
+    plan_type: str | None = None       # standard | trial | demo | byok
+    frozen: bool | None = None
+    allowance_eur: float | None = None
+    allowance_tokens: int | None = None
+    anchor_day: int | None = None
+    sell_in: float | None = None       # € per 1k input tokens
+    sell_cached: float | None = None
+    sell_out: float | None = None
+    overage_mult: float | None = None
+    notes: str | None = None
+    clear_allowance_eur: bool = False     # explicit clears (None means "leave")
+    clear_allowance_tokens: bool = False
+
+
+class SourceRatesIn(BaseModel):
+    set_id: str
+    buy_in: float = 0
+    buy_cached: float = 0
+    buy_out: float = 0
+
+
+@router.get("/ledger/summary")
+def ledger_summary() -> dict[str, Any]:
+    return ledger_mod.summary()
+
+
+@router.get("/ledger/plan/{name}")
+def ledger_plan_get(name: str) -> dict[str, Any]:
+    client = cfg.find_client(name)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+    return ledger_mod.ensure_plan(client)
+
+
+@router.post("/ledger/plan/{name}")
+def ledger_plan_set(name: str, body: PlanIn) -> dict[str, Any]:
+    client = cfg.find_client(name)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+    ledger_mod.ensure_plan(client)
+    fields = body.model_dump(exclude={"clear_allowance_eur", "clear_allowance_tokens"})
+    if body.frozen is not None:
+        fields["frozen"] = 1 if body.frozen else 0
+    if body.clear_allowance_eur:
+        fields["allowance_eur"] = None
+    elif fields.get("allowance_eur") is None:
+        fields.pop("allowance_eur", None)
+    if body.clear_allowance_tokens:
+        fields["allowance_tokens"] = None
+    elif fields.get("allowance_tokens") is None:
+        fields.pop("allowance_tokens", None)
+    res = ledger_mod.set_plan(name, fields)
+    if not res["ok"]:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+@router.post("/ledger/source-rates")
+def ledger_source_rates(body: SourceRatesIn) -> dict[str, Any]:
+    if not any(s["id"] == body.set_id for s in vault_mod.load_vault()["sets"]):
+        raise HTTPException(status_code=404, detail=f"no vault set {body.set_id!r}")
+    return ledger_mod.set_source_rates(body.set_id, body.buy_in, body.buy_cached, body.buy_out)
+
+
+@router.post("/ledger/collect-now")
+def ledger_collect_now() -> dict[str, Any]:
+    """Synchronous snapshot pull across the fleet — the background
+    collector runs every ~5 min; this is the impatient-operator button."""
+    reports = ledger_mod.collect_all()
+    return {"ok": all(r["ok"] for r in reports) if reports else True, "reports": reports}

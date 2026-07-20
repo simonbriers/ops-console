@@ -21,6 +21,7 @@
       <button class="tab" data-page="tests">Tests</button>
       <button class="tab" data-page="onboarding">Onboarding</button>
       <button class="tab" data-page="credentials">Credentials</button>
+      <button class="tab" data-page="ledger">Tokens</button>
       <button class="tab" data-page="host">Host / VPS</button>
       <button class="tab tab-right" id="settingsBtn">Settings</button>
     </nav>
@@ -280,6 +281,69 @@
         <button type="button" id="openLegacyCredsBtn">Open the legacy .env copy tool…</button>
       </section>
     </div><!-- /page-credentials -->
+
+    <div id="page-ledger" class="page hidden">
+      <section class="ob-panel">
+        <h3>Clients &amp; plans</h3>
+        <p class="muted">Month-to-date LLM token usage per client (pulled from each instance's
+        <code>/admin/metrics</code> by a background collector every ~5 min), priced at that
+        client's <strong>sell rates</strong>, against their plan allowance. The
+        <strong>FROZEN</strong> flag hard-blocks credential applies server-side.</p>
+        <div class="ob-form">
+          <button type="button" id="ledgerCollectBtn">Collect now</button>
+          <span id="ledgerStatus" class="muted"></span>
+        </div>
+        <table id="ledgerClients">
+          <thead><tr><th>Client</th><th>Allowance</th><th>Used (month)</th>
+            <th>Left</th><th>Burn</th><th>Empty by</th><th></th></tr></thead>
+          <tbody id="ledgerClientsBody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </section>
+
+      <section class="ob-panel">
+        <h3>Edit a plan</h3>
+        <form id="ledgerPlanForm" class="ob-form">
+          <label>Client <select id="ledgerPlanClient"></select></label>
+          <label>Type
+            <select name="plan_type">
+              <option value="standard">standard</option>
+              <option value="trial">trial</option>
+              <option value="demo">demo (ours, never billed)</option>
+              <option value="byok">byok (client's own keys)</option>
+            </select>
+          </label>
+          <label class="ledger-frozen-label"><input type="checkbox" name="frozen" /> FROZEN
+            (block credential applies)</label>
+          <label>Allowance € / month <input type="number" step="any" name="allowance_eur" placeholder="empty = none" /></label>
+          <label>Allowance tokens / month <input type="number" name="allowance_tokens" placeholder="empty = none" /></label>
+          <label>Billing anchor day <input type="number" min="1" max="28" name="anchor_day" /></label>
+          <label>Sell € / 1k input <input type="number" step="any" name="sell_in" /></label>
+          <label>Sell € / 1k cached <input type="number" step="any" name="sell_cached" /></label>
+          <label>Sell € / 1k output <input type="number" step="any" name="sell_out" /></label>
+          <label>Overage multiplier <input type="number" step="any" name="overage_mult" title="overage price = sell rate × this" /></label>
+          <label>Notes <input name="notes" placeholder="contract details, tier, …" /></label>
+          <button type="submit" class="primary">Save plan</button>
+          <span id="ledgerPlanStatus" class="muted"></span>
+        </form>
+        <p class="muted">Set an allowance in € (preferred; usage is priced at the sell rates) or
+        in raw tokens (works before rates are set). The legacy
+        <code>monthly_token_quota</code> / <code>cost_per_1k_*</code> values from clients.json
+        seeded these plans on first load — this editor is now the authority.</p>
+      </section>
+
+      <section class="ob-panel">
+        <h3>Sources — who drank from which tank</h3>
+        <p class="muted">Per vault credential: which clients drew tokens through it this month
+        (joined via the <code>api_key_alias</code> hash), and what that flow costs at your
+        <strong>buy rates</strong>. Unknown aliases = keys the vault doesn't hold (see
+        Credentials → Reconcile).</p>
+        <table id="ledgerSources">
+          <thead><tr><th>Source</th><th>Drawn by</th><th>Usage (month)</th>
+            <th>Buy cost</th><th>Buy rates €/1k (in · cached · out)</th></tr></thead>
+          <tbody id="ledgerSourcesBody"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
+        </table>
+      </section>
+    </div><!-- /page-ledger -->
   </main>
 
   <!-- Detail modal -->
@@ -489,5 +553,7 @@
        provides refreshVault()/populateVaultClientSelect() that
        switchPage() calls. -->
   <script src="/static/credentials.js?v=vault2-7"></script>
+  <!-- Tokens tab (metering ledger, TOKEN_ECONOMY_PLAN.md Phase 2). -->
+  <script src="/static/ledger.js?v=ledger-1"></script>
 </body>
 </html>

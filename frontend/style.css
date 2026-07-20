@@ -349,3 +349,17 @@ strong.down { color: var(--down); }
 .vault-cell-empty { text-align: center; }
 .vault-matrix-status { font-size: 0.72rem; max-width: 11rem; }
 .vault-drift { color: var(--warn); }
+
+/* -- Tokens tab / metering ledger (ledger.js) ------------------------------ */
+.ledger-sub { font-size: 0.72rem; }
+.ledger-bar { display: inline-block; width: 90px; height: 9px; background: #eee;
+  border-radius: 5px; overflow: hidden; vertical-align: middle; margin-right: 0.4rem; }
+.ledger-bar-fill { height: 100%; background: var(--ok); border-radius: 5px; }
+.ledger-pct-warn .ledger-bar-fill, .ledger-bar.ledger-pct-warn .ledger-bar-fill { background: var(--warn); }
+.ledger-pct-empty .ledger-bar-fill, .ledger-bar.ledger-pct-empty .ledger-bar-fill { background: var(--down); }
+.ledger-pct { font-size: 0.8rem; }
+.ledger-pct.ledger-pct-warn { color: var(--warn); }
+.ledger-pct.ledger-pct-empty { color: var(--down); }
+.ledger-rate { width: 5.2rem; font-size: 0.78rem; }
+.ledger-rates-cell { white-space: nowrap; }
+.ledger-frozen-label { color: var(--down); font-weight: 600; }
