@@ -317,6 +317,7 @@
           </label>
           <label class="ledger-frozen-label"><input type="checkbox" name="frozen" /> FROZEN
             (block credential applies)</label>
+          <label>Base fee € / month <input type="number" step="any" name="base_fee_eur" placeholder="subscription price" /></label>
           <label>Allowance € / month <input type="number" step="any" name="allowance_eur" placeholder="empty = none" /></label>
           <label>Allowance tokens / month <input type="number" name="allowance_tokens" placeholder="empty = none" /></label>
           <label>Billing anchor day <input type="number" min="1" max="28" name="anchor_day" /></label>
@@ -575,7 +576,7 @@
        switchPage() calls. -->
   <script src="/static/credentials.js?v=vault2-7"></script>
   <!-- Tokens tab (metering ledger, TOKEN_ECONOMY_PLAN.md Phases 2+3). -->
-  <script src="/static/ledger.js?v=ledger-2"></script>
+  <script src="/static/ledger.js?v=ledger-3"></script>
   <!-- Flow tab (tanks & pipes visual, Phase 4). -->
   <script src="/static/flow.js?v=flow-1"></script>
 </body>

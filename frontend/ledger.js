@@ -73,9 +73,11 @@ function renderLedgerClients() {
   const body = $("ledgerClientsBody");
   const rows = (ledgerData.clients || []).map((c) => {
     const p = c.plan;
+    const fee = p.base_fee_eur ? `${eur(p.base_fee_eur)} + ` : "";
     const allowance = p.allowance_eur
-      ? eur(p.allowance_eur) + "/mo"
-      : (p.allowance_tokens ? tok(p.allowance_tokens) + " tok/mo" : "—");
+      ? fee + eur(p.allowance_eur) + " incl/mo"
+      : (p.allowance_tokens ? fee + tok(p.allowance_tokens) + " tok incl/mo"
+                            : (fee ? fee.slice(0, -3) + "/mo" : "—"));
     const pct = c.pct_left === null || c.pct_left === undefined ? null : Math.round(c.pct_left * 100);
     const pctCls = pct === null ? "" : (pct <= 0 ? "ledger-pct-empty" : (pct < 20 ? "ledger-pct-warn" : ""));
     const bar = pct === null ? `<span class="muted">no allowance set</span>`
@@ -137,6 +139,7 @@ function ledgerLoadPlan(name) {
   const form = $("ledgerPlanForm");
   form.querySelector('[name="plan_type"]').value = p.plan_type || "standard";
   form.querySelector('[name="frozen"]').checked = !!p.frozen;
+  form.querySelector('[name="base_fee_eur"]').value = p.base_fee_eur ?? "";
   form.querySelector('[name="allowance_eur"]').value = p.allowance_eur ?? "";
   form.querySelector('[name="allowance_tokens"]').value = p.allowance_tokens ?? "";
   form.querySelector('[name="anchor_day"]').value = p.anchor_day ?? 1;
@@ -161,6 +164,7 @@ async function submitLedgerPlan(e) {
   const body = {
     plan_type: form.querySelector('[name="plan_type"]').value,
     frozen: form.querySelector('[name="frozen"]').checked,
+    base_fee_eur: num("base_fee_eur"),
     allowance_eur: num("allowance_eur"),
     clear_allowance_eur: form.querySelector('[name="allowance_eur"]').value === "",
     allowance_tokens: num("allowance_tokens"),

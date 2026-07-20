@@ -392,6 +392,14 @@ projected empty date, statement-to-date.
   `PUT /admin/config` with `OPERATOR_TOKEN`. This gets validation (EU
   voice guard, brand_color, field checks), hot reload, and the
   instance's own audit trail for free.
+- **Model switching lives here** (settled 2026-07-20): LLM/voice model
+  choice is config, so per-client model swaps become a config-manager
+  action — with the provider's rate-limit facts shown next to the
+  picker (from the source set's notes). Fleet model policy until then:
+  default `mistral-small` (widest free-tier pipe: 2.25M tok/min,
+  5 req/s), `large`/`medium` only as named exceptions (large =
+  0.07 req/s → 429s under concurrency; key_2 fallback catches it),
+  migrate the remaining `open-mistral-nemo` instance to small.
 - **SSH as fallback tier**: file read for down instances and for
   periodic **drift detection** (diff live file vs. last-written state
   vs. shipped defaults — this finally closes the tracked "stale
@@ -442,6 +450,17 @@ Voxtral / piper / nvidia, see dental `backend/voice/`):
   key/alias as LLM+STT — one credential, three metered roles, which the
   ledger must attribute per role (the product-side counter provides the
   split; the provider's own usage view only shows the total).
+- **Voxtral TTS facts (verified 2026-07-20, docs.mistral.ai):** 9
+  languages including **Spanish and Dutch** (NL matters for the future
+  market); voice selection by voice_id; **zero-shot voice cloning from
+  2–3 s of audio** + saved reusable voice profiles; pricing bracket
+  $0/M chars (free tier) → **$16/M chars** paid — Google-Neural2-class
+  pricing but EU. The catalog (`tts_voices.yaml`) only registers two
+  en-GB presets today; a Spanish voice must be added for the Valor
+  upgrade (rehearse on acme). Product idea unlocked: **clinic-branded
+  cloned voice as a premium plan feature**, priced through the normal
+  tank/tariff machinery — pending a check of cloning terms on the
+  privacy page before any patient-facing use.
 
 ### Deferred / explicitly not now
 
@@ -515,3 +534,20 @@ any `.env` change, schema changes need a reseed.
    limited to surfacing caps and warning when a setup risks provider
    push-back (some providers' terms forbid free-tier stacking); it
    never blocks a configuration.
+9. **Per-model buy pricing** (refinement): source buy-rates are per
+   credential, but one mistral key carries several models with very
+   different prices (Small 4 $0.15/$0.60 vs Medium 3.5 $1.50/$7.50 per
+   1M, cached −90%, official 2026-07 list). The ledger already stores
+   by-model usage — pricing buy-side per (source, model) instead of a
+   blended per-source rate is a small, worthwhile Phase 8/9 upgrade.
+   Reference paid prices (USD/1M): small 0.15/0.60, large 0.50/1.50,
+   medium 1.50/7.50, nemo 0.15/0.15, ministral 0.10–0.20 flat;
+   Voxtral TTS $16/M chars, Transcribe realtime $0.006/min; batch −50%.
+   July-2026 simulation: the ENTIRE fleet month ≈ $4.60 at paid rates.
+10. **Mistral key split** (evidence 2026-07-20: provider meter shows
+   36.9M tokens vs the smaller fleet total, incl. `labs-leanstral` —
+   a Lean-proof coding agent no receptionist calls): create a separate
+   personal/dev key so fleet attribution stays clean; one key per
+   purpose. Also still open: the free tier's privacy/ZDR terms for
+   medical clients (Valor runs LLM+STT on it) — may force a paid/ZDR
+   second mistral source ("compliance tiers as separate sources").

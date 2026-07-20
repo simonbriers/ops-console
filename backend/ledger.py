@@ -59,8 +59,8 @@ PLAN_TYPES = ("standard", "trial", "demo", "byok")
 ALERT_THRESHOLDS = (80, 100)
 
 _PLAN_FIELDS = {
-    "plan_type": str, "frozen": int, "allowance_eur": float,
-    "allowance_tokens": int, "anchor_day": int,
+    "plan_type": str, "frozen": int, "base_fee_eur": float,
+    "allowance_eur": float, "allowance_tokens": int, "anchor_day": int,
     "sell_in": float, "sell_cached": float, "sell_out": float,
     "overage_mult": float, "notes": str,
 }
@@ -94,6 +94,12 @@ def _db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE source_rates ADD COLUMN cap_tokens INTEGER")
     except sqlite3.OperationalError:
         pass  # column already exists
+    try:  # base subscription fee, separate from usage value — enables the
+        # "base price includes N tokens; beyond that, cost+margin per token"
+        # plan shape (2026-07-20)
+        conn.execute("ALTER TABLE plans ADD COLUMN base_fee_eur REAL")
+    except sqlite3.OperationalError:
+        pass
     conn.execute("""CREATE TABLE IF NOT EXISTS alerts (
         ts TEXT NOT NULL, month TEXT NOT NULL, client TEXT NOT NULL,
         threshold INTEGER NOT NULL, pct_used REAL,
@@ -365,6 +371,7 @@ def _client_economics(client: dict[str, Any], month: str) -> dict[str, Any]:
 
     sell_raw = _eur(usage, plan["sell_in"], plan["sell_cached"], plan["sell_out"])
     allowance_eur = plan["allowance_eur"]
+    base_fee = plan.get("base_fee_eur") or 0.0
     included = overage = breakage = margin = None
     eur_used = sell_raw
     pct_used = pct_left = remaining_tokens = None
@@ -372,17 +379,33 @@ def _client_economics(client: dict[str, Any], month: str) -> dict[str, Any]:
         included = round(min(sell_raw, allowance_eur), 4)
         overage = round(max(0.0, sell_raw - allowance_eur) * (plan["overage_mult"] or 1.0), 4)
         breakage = round(max(0.0, allowance_eur - sell_raw), 4)
-        margin = round(allowance_eur + overage - buy_eur, 4)
+        # revenue = the plan price (base fee if set, else the € allowance
+        # doubling as the price) + overage
+        margin = round((base_fee or allowance_eur) + overage - buy_eur, 4)
         eur_used = round(included + overage, 4)
         pct_used = round(sell_raw / allowance_eur, 4)
         pct_left = max(0.0, round(1 - pct_used, 4))
     elif plan["allowance_tokens"]:
+        # Token-allowance plan: base fee includes N tokens; usage beyond N
+        # is billed at sell rates × overage_mult. The over-quota portion's
+        # in/cached/out composition isn't tracked separately, so overage is
+        # pro-rated by token share — exact enough for billing, and stated
+        # as such on statements.
         remaining_tokens = max(0, plan["allowance_tokens"] - usage["total"])
         pct_used = round(usage["total"] / plan["allowance_tokens"], 4)
         pct_left = max(0.0, round(remaining_tokens / plan["allowance_tokens"], 4))
-        margin = round(sell_raw - buy_eur, 4) if (sell_raw or buy_eur) else None
+        over_tokens = max(0, usage["total"] - plan["allowance_tokens"])
+        if over_tokens and usage["total"]:
+            factor = over_tokens / usage["total"]
+            overage = round(sell_raw * factor * (plan["overage_mult"] or 1.0), 4)
+            included = round(sell_raw * (1 - factor), 4)
+        else:
+            overage = 0.0
+            included = round(sell_raw, 4)
+        eur_used = round(included + overage, 4)
+        margin = round(base_fee + overage - buy_eur, 4) if (base_fee or overage or buy_eur) else None
     else:
-        margin = round(sell_raw - buy_eur, 4) if (sell_raw or buy_eur) else None
+        margin = round(base_fee + sell_raw - buy_eur, 4) if (base_fee or sell_raw or buy_eur) else None
     if plan["plan_type"] in ("demo", "byok"):
         # demo: ours, never billed; byok: their key, no resale — economics
         # reduce to "what does this cost us" (demo) / "zero flow" (byok)
@@ -504,19 +527,26 @@ def statement_markdown(data: dict[str, Any]) -> str:
     ]
     for m, u in sorted(e["by_model"].items()):
         lines.append(f"  - {m}: {u['total']:,}")
+    base_fee = p.get("base_fee_eur") or 0.0
     lines += ["", "## Charges"]
     if p["allowance_eur"]:
+        plan_price = base_fee or p["allowance_eur"]
         lines += [
-            f"- Included in plan: €{e['included_eur']:.2f} of €{p['allowance_eur']:.2f}",
+            f"- Plan fee: €{plan_price:.2f}",
+            f"- Included usage: €{e['included_eur']:.2f} of €{p['allowance_eur']:.2f}",
             f"- Overage: €{e['overage_eur']:.2f}"
             + (f" (at ×{p['overage_mult']:.2f} of sell rates)" if e["overage_eur"] else ""),
-            f"- **Total this period: €{(p['allowance_eur'] + (e['overage_eur'] or 0)):.2f}**",
+            f"- **Total this period: €{(plan_price + (e['overage_eur'] or 0)):.2f}**",
         ]
     elif p["allowance_tokens"]:
         lines += [
+            (f"- Plan fee: €{base_fee:.2f}" if base_fee else "- Plan fee: (none set)"),
             f"- Included tokens used: {min(e['usage']['total'], p['allowance_tokens']):,} "
             f"of {p['allowance_tokens']:,}",
-            f"- Metered value at sell rates: €{e['sell_raw']:.2f}",
+            f"- Overage: €{(e['overage_eur'] or 0):.2f}"
+            + (f" (usage beyond allowance, pro-rated, ×{p['overage_mult']:.2f})"
+               if e["overage_eur"] else ""),
+            f"- **Total this period: €{(base_fee + (e['overage_eur'] or 0)):.2f}**",
         ]
     else:
         lines.append(f"- Metered value at sell rates: €{e['sell_raw']:.2f}")

@@ -1259,6 +1259,7 @@ def client_apply_credentials(name: str, body: ApplyCredsIn) -> dict[str, Any]:
 class PlanIn(BaseModel):
     plan_type: str | None = None       # standard | trial | demo | byok
     frozen: bool | None = None
+    base_fee_eur: float | None = None  # monthly subscription price (the "free tier at a base price")
     allowance_eur: float | None = None
     allowance_tokens: int | None = None
     anchor_day: int | None = None
