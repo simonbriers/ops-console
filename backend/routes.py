@@ -1343,3 +1343,47 @@ def ledger_collect_now() -> dict[str, Any]:
     collector runs every ~5 min; this is the impatient-operator button."""
     reports = ledger_mod.collect_all()
     return {"ok": all(r["ok"] for r in reports) if reports else True, "reports": reports}
+
+
+class PushPlanIn(BaseModel):
+    overage_note: str | None = None   # optional extra sentence for the clinic's banner
+
+
+@router.post("/ledger/push-plan/{name}")
+def ledger_push_plan(name: str, body: PushPlanIn) -> dict[str, Any]:
+    """Phase 5: push the plan DENOMINATOR (included tokens + anchor day) to
+    the instance's validated config API, so its dashboard gauge and 80/100%
+    warning emails run locally with no dependency on this console. The
+    console stays the source of truth for the plan; the instance only ever
+    learns the number it must count against."""
+    client = cfg.find_client(name)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+    if ledger_mod.is_frozen(name):
+        raise HTTPException(status_code=423,
+                            detail=f"{name} is FROZEN — plan push is a config write. "
+                                   "Unfreeze on the Tokens tab first (rehearse on acme).")
+    plan = ledger_mod.ensure_plan(client)
+    if not plan.get("allowance_tokens"):
+        raise HTTPException(status_code=400,
+                            detail="Set a TOKEN allowance in this client's plan first — "
+                                   "the instance gauge counts tokens, not €.")
+    payload = {"plan_included_tokens": int(plan["allowance_tokens"]),
+               "plan_anchor_day": int(plan.get("anchor_day") or 1)}
+    if body.overage_note is not None:
+        payload["plan_overage_note"] = body.overage_note
+    try:
+        core._admin_put_json(client, "/admin/config", payload)
+        # Verify the instance actually understood the plan fields — an
+        # un-upgraded instance's SiteConfigPatch silently ignores unknown
+        # keys, which would read as success while writing nothing.
+        echo = core._admin_get_json(client, "/admin/config", {})
+        landed = int(echo.get("plan_included_tokens") or 0) == int(plan["allowance_tokens"])
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"push failed: {e}")
+    if not landed:
+        raise HTTPException(status_code=409,
+                            detail="Instance accepted the write but has no plan fields — "
+                                   "it's running a build from before Phase 5. Update it "
+                                   "(Updates tab), then push again.")
+    return {"ok": True, "error": None, "pushed": payload, "client": name}

@@ -109,6 +109,9 @@ function renderLedgerClients() {
         <button type="button" class="ledger-edit" data-client="${escapeHtml(c.name)}">Edit plan</button>
         <button type="button" class="ledger-statement" data-client="${escapeHtml(c.name)}"
           title="markdown usage statement (this month)">Statement</button>
+        <button type="button" class="ledger-push" data-client="${escapeHtml(c.name)}"
+          title="push the token allowance + anchor day to the instance — enables its dashboard gauge and 80/100% warning emails (needs a token allowance; blocked on frozen clients)">Push plan</button>
+        <div class="muted ledger-push-status ledger-sub" data-client="${escapeHtml(c.name)}"></div>
       </td>
     </tr>`;
   });
@@ -121,6 +124,25 @@ function renderLedgerClients() {
     btn.addEventListener("click", () =>
       window.open(`/api/ledger/statement/${encodeURIComponent(btn.dataset.client)}`, "_blank"));
   });
+  body.querySelectorAll(".ledger-push").forEach((btn) => {
+    btn.addEventListener("click", () => ledgerPushPlan(btn.dataset.client));
+  });
+}
+
+async function ledgerPushPlan(clientName) {
+  const statusEl = document.querySelector(
+    `.ledger-push-status[data-client="${CSS.escape(clientName)}"]`);
+  if (!confirm(`Push ${clientName}'s plan (included tokens + reset day) to its instance?\n\n`
+      + `This writes the instance's config via its own validated admin API and `
+      + `enables the clinic-side gauge + 80/100% warning emails.`)) return;
+  statusEl.textContent = "pushing…";
+  const r = await fetch(`/api/ledger/push-plan/${encodeURIComponent(clientName)}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}) });
+  const data = await r.json().catch(() => ({}));
+  statusEl.textContent = r.ok
+    ? `✔ pushed ${tok(data.pushed?.plan_included_tokens)} tok · day ${data.pushed?.plan_anchor_day}`
+    : `✘ ${data.detail || "push failed"}`;
 }
 
 function populateLedgerPlanSelect() {

@@ -1164,6 +1164,40 @@ def _admin_get_json(client: dict[str, Any], path: str, params: dict[str, Any]) -
     return resp.json()
 
 
+def _admin_put_json(client: dict[str, Any], path: str, payload: dict[str, Any]) -> Any:
+    """PUT a JSON body to an instance's admin API — the write twin of
+    _admin_get_json, same two transports (plain HTTPS with X-Admin-Token, or
+    curl over the SSH loopback for ADMIN_TUNNEL_ONLY instances). Used by the
+    ledger's plan push (Phase 5) and, later, the config manager (Phase 7):
+    writes go through the instance's OWN validated endpoint (PUT
+    /admin/config), never raw file edits. Raises on transport/parse failure;
+    callers catch broadly."""
+    token = _real_token(client)
+    body = json.dumps(payload)
+    if client.get("admin_via_ssh"):
+        port = client.get("admin_local_port")
+        ssh_target = client.get("ssh_target") or ""
+        if not port:
+            raise RuntimeError("admin_via_ssh is set but admin_local_port is missing")
+        if not ssh_target:
+            raise RuntimeError("admin_via_ssh is set but ssh_target is missing")
+        url = f"http://127.0.0.1:{int(port)}{path}"
+        cmd = ("curl -fsS -m 20 -X PUT -H " + shlex.quote(f"X-Admin-Token: {token}")
+               + " -H " + shlex.quote("Content-Type: application/json")
+               + " --data " + shlex.quote(body) + " " + shlex.quote(url))
+        ok, out = run_ssh(ssh_target, cmd, timeout=SSH_TIMEOUT + 15)
+        if not ok:
+            raise RuntimeError(f"ssh admin put failed: {out[:300]}")
+        return json.loads(out)
+    base = (client.get("base_url") or "").rstrip("/")
+    resp = requests.put(f"{base}{path}", data=body,
+                        headers={"X-Admin-Token": token,
+                                 "Content-Type": "application/json"},
+                        timeout=HTTP_TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
 def check_usage(client: dict[str, Any], start: str | None = None, end: str | None = None) -> dict[str, Any]:
     """GET {base_url}/admin/metrics — the token-usage endpoint that already
     ships in the product's backend/admin.py (get_metrics). Nothing new on
