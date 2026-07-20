@@ -1,42 +1,45 @@
-"""Metering ledger (docs/TOKEN_ECONOMY_PLAN.md Phase 2) — the economic
-layer's memory. Knows NOTHING about SSH, Docker, or deployments (that
-boundary is what keeps the console from tangling): it consumes three
-inputs — usage snapshots pulled from each instance's /admin/metrics,
-credential assignments from the vault (joined via the api_key_alias
-hash), and price/plan configuration — and emits balances, burn rates,
-projections, and per-source totals.
+"""Metering ledger (docs/TOKEN_ECONOMY_PLAN.md Phases 2+3) — the economic
+layer's memory and math. Knows NOTHING about SSH, Docker, or deployments
+(that boundary is what keeps the console from tangling): it consumes
+three inputs — usage snapshots pulled from each instance's
+/admin/metrics, credential assignments from the vault (joined via the
+api_key_alias hash), and price/plan configuration — and emits balances,
+burn rates, projections, per-source totals, and the business numbers:
+breakage, overage, margin, statements, threshold alerts.
 
 Storage: <config-dir>/ledger.sqlite — same volume as clients.json and
 vault.json, never in git. Tables:
 
-  snap_key    month-to-date absolutes per (client, api_key_alias)
-  snap_model  month-to-date absolutes per (client, model)
-  plans       per client: type (standard|trial|demo|byok), frozen flag,
-              allowance (in € and/or tokens), billing anchor day,
-              sell-rates €/1k tokens (in/cached/out), overage multiplier
-  source_rates  per vault set: buy-rates €/1k tokens
+  snap_key      month-to-date absolutes per (client, api_key_alias)
+  snap_model    month-to-date absolutes per (client, model)
+  plans         per client: type (standard|trial|demo|byok), frozen flag,
+                allowance (€ and/or tokens), billing anchor day,
+                sell-rates €/1k tokens, overage multiplier
+  source_rates  per vault set: buy-rates €/1k tokens + optional monthly
+                token cap (free-tier tanks — e.g. a free-tier key's quota)
+  alerts        one row per (month, client, threshold) crossing — 80/100%
+                of allowance, written by the collector, shown in the UI
 
-Snapshots store what /admin/metrics reports: MONTH-TO-DATE totals, one
-row per change (an insert only happens when the numbers moved), so the
-series stays tiny while still yielding burn rates and projections by
-differencing. The instance remains the source of truth for the current
-month; this ledger is the history and the joins.
+Economics (Phase 3), all € and all derived at read time so re-pricing
+never touches history:
 
-Collection: a daemon thread (start_collector(), called from main.py)
-pulls every LEDGER_POLL_SECONDS (default 300). Browser-driven dashboard
-polling is NOT relied on — metering must not stop when the operator
-closes the tab. Instances that error (down, placeholder token) are
-skipped until the next round; metering is read-only and safe for frozen
-clients.
+  eur_used   = usage × the client's SELL rates
+  included   = min(eur_used, allowance_eur)
+  overage    = max(0, eur_used − allowance_eur) × overage_mult
+  breakage   = max(0, allowance_eur − eur_used)   (sold but unused = margin)
+  buy_eur    = usage × each source's BUY rates (per-alias join)
+  margin     = allowance_eur + overage − buy_eur  (subscription model)
+               — for plans without a € allowance, margin falls back to
+               eur_used − buy_eur (pure metered resale view)
 
-Billing cycles: Phase 2 works in CALENDAR months (what /admin/metrics
-serves). The plan's anchor_day is stored and displayed but cycle-shifted
-accounting arrives with the statement work (Phase 3).
-
-clients.json migration: the legacy per-client `monthly_token_quota` and
-`cost_per_1k_*` fields seed a client's plan row on first touch
-(allowance_tokens and sell rates respectively); after that, the plan row
-here is authoritative and those fields are ignored by the ledger.
+Snapshots store month-to-date absolutes, one row per change, so the
+series stays tiny while still yielding burn rates by differencing.
+Collection runs in a daemon thread (start_collector(), from main.py)
+every LEDGER_POLL_SECONDS (default 300) — metering must not depend on a
+browser tab. Billing cycles: calendar months for now (what
+/admin/metrics serves); anchor_day is stored for the Phase 5+ cycle
+shift. clients.json's legacy `monthly_token_quota` / `cost_per_1k_*`
+seed a plan row on first touch; after that this ledger is authoritative.
 """
 from __future__ import annotations
 
@@ -53,6 +56,7 @@ from backend import vault as vault_mod
 from backend.core import _admin_get_json, _month_bounds
 
 PLAN_TYPES = ("standard", "trial", "demo", "byok")
+ALERT_THRESHOLDS = (80, 100)
 
 _PLAN_FIELDS = {
     "plan_type": str, "frozen": int, "allowance_eur": float,
@@ -86,6 +90,14 @@ def _db() -> sqlite3.Connection:
     conn.execute("""CREATE TABLE IF NOT EXISTS source_rates (
         set_id TEXT PRIMARY KEY, buy_in REAL DEFAULT 0,
         buy_cached REAL DEFAULT 0, buy_out REAL DEFAULT 0)""")
+    try:  # Phase 3: optional monthly token cap → a source becomes a real tank
+        conn.execute("ALTER TABLE source_rates ADD COLUMN cap_tokens INTEGER")
+    except sqlite3.OperationalError:
+        pass  # column already exists
+    conn.execute("""CREATE TABLE IF NOT EXISTS alerts (
+        ts TEXT NOT NULL, month TEXT NOT NULL, client TEXT NOT NULL,
+        threshold INTEGER NOT NULL, pct_used REAL,
+        UNIQUE (month, client, threshold))""")
     conn.execute("""CREATE INDEX IF NOT EXISTS idx_snap_key
         ON snap_key (client, month, alias, ts)""")
     conn.execute("""CREATE INDEX IF NOT EXISTS idx_snap_model
@@ -102,7 +114,7 @@ def _month() -> str:
 
 
 # ---------------------------------------------------------------------------
-# Plans
+# Plans & source rates
 # ---------------------------------------------------------------------------
 
 def ensure_plan(client: dict[str, Any]) -> dict[str, Any]:
@@ -157,13 +169,17 @@ def is_frozen(client_name: str) -> bool:
     return bool(plan and plan.get("frozen"))
 
 
-def set_source_rates(set_id: str, buy_in: float, buy_cached: float, buy_out: float) -> dict[str, Any]:
+def set_source_rates(set_id: str, buy_in: float, buy_cached: float, buy_out: float,
+                     cap_tokens: int | None = None) -> dict[str, Any]:
     with _db() as conn:
         conn.execute(
-            "INSERT INTO source_rates (set_id, buy_in, buy_cached, buy_out) VALUES (?,?,?,?) "
+            "INSERT INTO source_rates (set_id, buy_in, buy_cached, buy_out, cap_tokens) "
+            "VALUES (?,?,?,?,?) "
             "ON CONFLICT(set_id) DO UPDATE SET buy_in=excluded.buy_in, "
-            "buy_cached=excluded.buy_cached, buy_out=excluded.buy_out",
-            (set_id, float(buy_in or 0), float(buy_cached or 0), float(buy_out or 0)))
+            "buy_cached=excluded.buy_cached, buy_out=excluded.buy_out, "
+            "cap_tokens=excluded.cap_tokens",
+            (set_id, float(buy_in or 0), float(buy_cached or 0), float(buy_out or 0),
+             int(cap_tokens) if cap_tokens else None))
     return {"ok": True, "error": None}
 
 
@@ -198,17 +214,43 @@ def record_metrics(client_name: str, by_key: dict[str, Any], by_model: dict[str,
     return written
 
 
+def _check_thresholds(client: dict[str, Any]) -> list[int]:
+    """After a snapshot lands: record 80%/100%-of-allowance crossings, once
+    per (client, month, threshold). Console-side alerting (the clinic-facing
+    warning emails are the product's job, Phase 5)."""
+    name = client.get("name", "?")
+    month = _month()
+    econ = _client_economics(client, month)
+    pct_used = econ.get("pct_used")
+    if pct_used is None:
+        return []
+    fired = []
+    with _db() as conn:
+        for threshold in ALERT_THRESHOLDS:
+            if pct_used * 100 >= threshold:
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO alerts (ts, month, client, threshold, pct_used) "
+                    "VALUES (?,?,?,?,?)", (_now(), month, name, threshold, round(pct_used, 4)))
+                if cur.rowcount:
+                    fired.append(threshold)
+    return fired
+
+
 def fetch_and_record(client: dict[str, Any]) -> dict[str, Any]:
-    """Pull /admin/metrics (month-to-date) for one client and snapshot the
-    by_key/by_model aggregations. Read-only toward the instance."""
+    """Pull /admin/metrics (month-to-date) for one client, snapshot the
+    by_key/by_model aggregations, evaluate alert thresholds. Read-only
+    toward the instance."""
     name = client.get("name", "?")
     try:
         start, end = _month_bounds()
         data = _admin_get_json(client, "/admin/metrics", {"start": start, "end": end})
         written = record_metrics(name, data.get("by_key") or {}, data.get("by_model") or {})
-        return {"ok": True, "error": None, "client": name, "rows_written": written}
+        fired = _check_thresholds(client) if written else []
+        return {"ok": True, "error": None, "client": name,
+                "rows_written": written, "alerts_fired": fired}
     except Exception as e:
-        return {"ok": False, "error": str(e), "client": name, "rows_written": 0}
+        return {"ok": False, "error": str(e), "client": name,
+                "rows_written": 0, "alerts_fired": []}
 
 
 def collect_all() -> list[dict[str, Any]]:
@@ -240,19 +282,35 @@ def start_collector() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Summary math
+# Joins & math helpers
 # ---------------------------------------------------------------------------
+
+def _alias_map() -> dict[str, dict[str, Any]]:
+    """alias -> vault set (a comma-separated key pair owns several aliases)."""
+    out: dict[str, dict[str, Any]] = {}
+    for s in vault_mod.load_vault()["sets"]:
+        idk = vault_mod._ID_KEY.get(s.get("kind", ""))
+        if not idk:
+            continue
+        raw = (s.get("values") or {}).get(idk, "")
+        for part in raw.split(","):
+            if part.strip():
+                out[vault_mod.alias_for(part)] = s
+    return out
+
+
+def _source_rate_map(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    return {r["set_id"]: dict(r) for r in conn.execute("SELECT * FROM source_rates")}
+
 
 def _latest_per(conn: sqlite3.Connection, table: str, col: str, client: str,
                 month: str, cutoff_ts: str | None = None) -> dict[str, dict[str, int]]:
-    """Latest row per alias/model for a client+month, optionally 'as of'
-    a cutoff timestamp (for burn-rate differencing)."""
     where, params = "client=? AND month=?", [client, month]
     if cutoff_ts:
         where += " AND ts<=?"
         params.append(cutoff_ts)
     rows = conn.execute(
-        f"SELECT {col} AS k, input, cached, output, total, ts FROM {table} "
+        f"SELECT {col} AS k, input, cached, output, total FROM {table} "
         f"WHERE {where} ORDER BY ts ASC", params).fetchall()
     out: dict[str, dict[str, int]] = {}
     for r in rows:  # ascending → last write per key wins
@@ -275,86 +333,199 @@ def _sum(buckets: list[dict[str, int]]) -> dict[str, int]:
     return out
 
 
+def _client_economics(client: dict[str, Any], month: str) -> dict[str, Any]:
+    """The full per-client picture for one month: usage, per-alias split,
+    sell-side €, buy-side €, breakage/overage/margin, % and projections.
+    Single source of truth — summary(), statements, and the alert check
+    all read this."""
+    name = client.get("name", "?")
+    plan = ensure_plan(client)
+    alias_to_set = _alias_map()
+    cutoff = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
+    with _db() as conn:
+        now_by_alias = _latest_per(conn, "snap_key", "alias", name, month)
+        then_by_alias = _latest_per(conn, "snap_key", "alias", name, month, cutoff)
+        by_model = _latest_per(conn, "snap_model", "model", name, month)
+        rates = _source_rate_map(conn)
+    usage = _sum(list(now_by_alias.values()))
+    burn_24h = max(0, usage["total"] - _sum(list(then_by_alias.values()))["total"])
+
+    per_alias, buy_eur, unpriced = [], 0.0, False
+    for alias, tokens in sorted(now_by_alias.items()):
+        s = alias_to_set.get(alias)
+        rate = rates.get(s["id"]) if s else None
+        alias_buy = _eur(tokens, rate["buy_in"], rate["buy_cached"], rate["buy_out"]) if rate else None
+        if alias_buy is None and alias != "local":
+            unpriced = True
+        buy_eur += alias_buy or 0.0
+        per_alias.append({"alias": alias, "set_id": s["id"] if s else None,
+                          "set_name": s["name"] if s else
+                          ("local model" if alias == "local" else "(unknown key)"),
+                          "buy_eur": alias_buy, **tokens})
+
+    sell_raw = _eur(usage, plan["sell_in"], plan["sell_cached"], plan["sell_out"])
+    allowance_eur = plan["allowance_eur"]
+    included = overage = breakage = margin = None
+    eur_used = sell_raw
+    pct_used = pct_left = remaining_tokens = None
+    if allowance_eur:
+        included = round(min(sell_raw, allowance_eur), 4)
+        overage = round(max(0.0, sell_raw - allowance_eur) * (plan["overage_mult"] or 1.0), 4)
+        breakage = round(max(0.0, allowance_eur - sell_raw), 4)
+        margin = round(allowance_eur + overage - buy_eur, 4)
+        eur_used = round(included + overage, 4)
+        pct_used = round(sell_raw / allowance_eur, 4)
+        pct_left = max(0.0, round(1 - pct_used, 4))
+    elif plan["allowance_tokens"]:
+        remaining_tokens = max(0, plan["allowance_tokens"] - usage["total"])
+        pct_used = round(usage["total"] / plan["allowance_tokens"], 4)
+        pct_left = max(0.0, round(remaining_tokens / plan["allowance_tokens"], 4))
+        margin = round(sell_raw - buy_eur, 4) if (sell_raw or buy_eur) else None
+    else:
+        margin = round(sell_raw - buy_eur, 4) if (sell_raw or buy_eur) else None
+    if plan["plan_type"] in ("demo", "byok"):
+        # demo: ours, never billed; byok: their key, no resale — economics
+        # reduce to "what does this cost us" (demo) / "zero flow" (byok)
+        included = overage = breakage = None
+        margin = round(-buy_eur, 4) if plan["plan_type"] == "demo" else margin
+
+    projected_empty = None
+    if pct_left is not None and burn_24h > 0 and plan["allowance_tokens"]:
+        remaining = plan["allowance_tokens"] - usage["total"]
+        if remaining > 0:
+            days = remaining / burn_24h
+            projected_empty = (datetime.now() + timedelta(days=days)).date().isoformat()
+
+    return {"name": name, "plan": plan, "usage": usage, "by_model": by_model,
+            "per_alias": per_alias, "eur_used": eur_used, "sell_raw": sell_raw,
+            "buy_eur": round(buy_eur, 4), "buy_unpriced": unpriced,
+            "included_eur": included, "overage_eur": overage,
+            "breakage_eur": breakage, "margin_eur": margin,
+            "pct_used": pct_used, "pct_left": pct_left,
+            "remaining_tokens": remaining_tokens, "burn_24h": burn_24h,
+            "projected_empty": projected_empty, "frozen": bool(plan["frozen"])}
+
+
+# ---------------------------------------------------------------------------
+# Summary, statements
+# ---------------------------------------------------------------------------
+
 def summary() -> dict[str, Any]:
-    """Everything the Tokens tab renders: per-client balances against
-    their plan, and per-source (vault set) totals across all clients."""
+    """Everything the Tokens and Flow tabs render: per-client economics,
+    per-source totals (with caps → tank fill levels), fleet totals, and
+    this month's alerts."""
     month = _month()
     clients = cfg.load_clients()
-    vault = vault_mod.load_vault()
-    # alias -> set (a set with a comma-separated key pair owns several aliases)
-    alias_to_set: dict[str, dict[str, Any]] = {}
-    for s in vault["sets"]:
-        idk = vault_mod._ID_KEY.get(s.get("kind", ""))
-        if not idk:
-            continue
-        raw = (s.get("values") or {}).get(idk, "")
-        for part in raw.split(","):
-            if part.strip():
-                alias_to_set[vault_mod.alias_for(part)] = s
+    client_rows = [_client_economics(c, month) for c in clients]
 
-    cutoff = (datetime.now() - timedelta(hours=24)).isoformat(timespec="seconds")
-    client_rows, source_totals = [], {}
     with _db() as conn:
-        for c in clients:
-            name = c.get("name", "?")
-            plan = ensure_plan(c)
-            now_by_alias = _latest_per(conn, "snap_key", "alias", name, month)
-            then_by_alias = _latest_per(conn, "snap_key", "alias", name, month, cutoff)
-            by_model = _latest_per(conn, "snap_model", "model", name, month)
-            usage = _sum(list(now_by_alias.values()))
-            usage_then = _sum(list(then_by_alias.values()))
-            burn_24h = max(0, usage["total"] - usage_then["total"])
-            eur_used = _eur(usage, plan["sell_in"], plan["sell_cached"], plan["sell_out"])
-            # % left against € allowance if set, else token allowance
-            pct_left = None
-            remaining_tokens = None
-            if plan["allowance_eur"]:
-                pct_left = max(0.0, round(1 - eur_used / plan["allowance_eur"], 4))
-            elif plan["allowance_tokens"]:
-                remaining_tokens = max(0, plan["allowance_tokens"] - usage["total"])
-                pct_left = max(0.0, round(remaining_tokens / plan["allowance_tokens"], 4))
-            projected_empty = None
-            if pct_left is not None and burn_24h > 0 and plan["allowance_tokens"]:
-                remaining = plan["allowance_tokens"] - usage["total"]
-                if remaining > 0:
-                    days = remaining / burn_24h
-                    projected_empty = (datetime.now() + timedelta(days=days)).date().isoformat()
-            per_alias = []
-            for alias, tokens in sorted(now_by_alias.items()):
-                s = alias_to_set.get(alias)
-                per_alias.append({"alias": alias, "set_id": s["id"] if s else None,
-                                  "set_name": s["name"] if s else
-                                  ("local model" if alias == "local" else "(unknown key)"),
-                                  **tokens})
-                key = s["id"] if s else alias
-                st = source_totals.setdefault(key, {
-                    "set_id": s["id"] if s else None,
-                    "set_name": s["name"] if s else
-                    ("local model" if alias == "local" else f"(unknown) {alias}"),
-                    "provider": (s or {}).get("provider", ""),
-                    "tier": (s or {}).get("tier", ""), "owner": (s or {}).get("owner", ""),
-                    "aliases": set(), "clients": {}, "usage": {"input": 0, "cached": 0,
-                                                               "output": 0, "total": 0}})
-                st["aliases"].add(alias)
-                st["clients"][name] = st["clients"].get(name, 0) + tokens["total"]
-                for k in st["usage"]:
-                    st["usage"][k] += tokens.get(k, 0)
-            client_rows.append({
-                "name": name, "plan": plan, "usage": usage, "by_model": by_model,
-                "per_alias": per_alias, "eur_used": eur_used, "pct_left": pct_left,
-                "remaining_tokens": remaining_tokens, "burn_24h": burn_24h,
-                "projected_empty": projected_empty, "frozen": bool(plan["frozen"]),
-            })
-        rates = {r["set_id"]: dict(r) for r in
-                 conn.execute("SELECT * FROM source_rates").fetchall()}
+        rates = _source_rate_map(conn)
+        alert_rows = [dict(r) for r in conn.execute(
+            "SELECT ts, client, threshold, pct_used FROM alerts WHERE month=? "
+            "ORDER BY ts DESC", (month,))]
+
+    source_totals: dict[str, dict[str, Any]] = {}
+    for row in client_rows:
+        for pa in row["per_alias"]:
+            key = pa["set_id"] or pa["alias"]
+            st = source_totals.setdefault(key, {
+                "set_id": pa["set_id"], "set_name": pa["set_name"],
+                "provider": "", "tier": "", "owner": "", "aliases": set(),
+                "clients": {}, "usage": {"input": 0, "cached": 0, "output": 0, "total": 0}})
+            st["aliases"].add(pa["alias"])
+            st["clients"][row["name"]] = st["clients"].get(row["name"], 0) + pa["total"]
+            for k in st["usage"]:
+                st["usage"][k] += pa.get(k, 0)
+    # enrich with vault metadata + rates + cap → fill level
+    sets_by_id = {s["id"]: s for s in vault_mod.load_vault()["sets"]}
     sources = []
     for st in source_totals.values():
-        rate = rates.get(st["set_id"] or "", {})
+        s = sets_by_id.get(st["set_id"] or "")
+        if s:
+            st["provider"], st["tier"], st["owner"] = (s.get("provider", ""),
+                                                       s.get("tier", ""), s.get("owner", ""))
+        rate = rates.get(st["set_id"] or "")
         st["aliases"] = sorted(st["aliases"])
-        st["buy_eur"] = _eur(st["usage"], rate.get("buy_in", 0),
-                             rate.get("buy_cached", 0), rate.get("buy_out", 0)) if rate else None
-        st["rates"] = {k: rate.get(k, 0) for k in ("buy_in", "buy_cached", "buy_out")} if rate else None
+        st["buy_eur"] = _eur(st["usage"], rate["buy_in"], rate["buy_cached"],
+                             rate["buy_out"]) if rate else None
+        st["rates"] = ({k: rate[k] for k in ("buy_in", "buy_cached", "buy_out")}
+                       if rate else None)
+        st["cap_tokens"] = rate["cap_tokens"] if rate and rate["cap_tokens"] else None
+        st["cap_left_pct"] = (max(0.0, round(1 - st["usage"]["total"] / st["cap_tokens"], 4))
+                              if st["cap_tokens"] else None)
         sources.append(st)
     sources.sort(key=lambda s: -s["usage"]["total"])
+
+    billed = [r for r in client_rows if r["plan"]["plan_type"] not in ("demo", "byok")]
+    fleet = {
+        "sold_allowance_eur": round(sum(r["plan"]["allowance_eur"] or 0 for r in billed), 2),
+        "consumed_sell_eur": round(sum(r["sell_raw"] or 0 for r in billed), 2),
+        "overage_eur": round(sum(r["overage_eur"] or 0 for r in billed), 2),
+        "breakage_eur": round(sum(r["breakage_eur"] or 0 for r in billed), 2),
+        "buy_eur": round(sum(r["buy_eur"] or 0 for r in client_rows), 2),
+        "margin_eur": round(sum(r["margin_eur"] or 0 for r in client_rows
+                                if r["margin_eur"] is not None), 2),
+        "total_tokens": sum(r["usage"]["total"] for r in client_rows),
+    }
     return {"month": month, "clients": client_rows, "sources": sources,
-            "generated": _now()}
+            "fleet": fleet, "alerts": alert_rows, "generated": _now()}
+
+
+def statement(client_name: str, month: str | None = None) -> dict[str, Any] | None:
+    """One client's month in full — the artifact behind an invoice.
+    Works for past months too (snapshots are kept per month)."""
+    client = cfg.find_client(client_name)
+    if client is None:
+        return None
+    month = month or _month()
+    econ = _client_economics(client, month)
+    chats_hint = None  # avg cost per conversation needs chats count; Phase 5+
+    return {"client": client_name, "month": month, "generated": _now(),
+            "economics": econ, "chats_hint": chats_hint}
+
+
+def statement_markdown(data: dict[str, Any]) -> str:
+    """Render a statement dict as operator-readable markdown (the client-
+    facing layout/branding is a later concern; the numbers are these)."""
+    e = data["economics"]
+    p = e["plan"]
+    lines = [
+        f"# Usage statement — {data['client']}",
+        f"Period: {data['month']} (calendar month, month-to-date if current)  ",
+        f"Generated: {data['generated']}  ",
+        f"Plan: **{p['plan_type']}**"
+        + (f" · allowance €{p['allowance_eur']:.2f}/month" if p["allowance_eur"] else "")
+        + (f" · allowance {p['allowance_tokens']:,} tokens/month" if p["allowance_tokens"] else ""),
+        "",
+        "## Usage",
+        f"- Tokens: {e['usage']['total']:,} "
+        f"(input {e['usage']['input']:,} · cached {e['usage']['cached']:,} "
+        f"· output {e['usage']['output']:,})",
+    ]
+    for m, u in sorted(e["by_model"].items()):
+        lines.append(f"  - {m}: {u['total']:,}")
+    lines += ["", "## Charges"]
+    if p["allowance_eur"]:
+        lines += [
+            f"- Included in plan: €{e['included_eur']:.2f} of €{p['allowance_eur']:.2f}",
+            f"- Overage: €{e['overage_eur']:.2f}"
+            + (f" (at ×{p['overage_mult']:.2f} of sell rates)" if e["overage_eur"] else ""),
+            f"- **Total this period: €{(p['allowance_eur'] + (e['overage_eur'] or 0)):.2f}**",
+        ]
+    elif p["allowance_tokens"]:
+        lines += [
+            f"- Included tokens used: {min(e['usage']['total'], p['allowance_tokens']):,} "
+            f"of {p['allowance_tokens']:,}",
+            f"- Metered value at sell rates: €{e['sell_raw']:.2f}",
+        ]
+    else:
+        lines.append(f"- Metered value at sell rates: €{e['sell_raw']:.2f}")
+    if e["pct_left"] is not None:
+        lines.append(f"- Allowance remaining: {round(e['pct_left'] * 100)}%")
+    lines += ["", "_Internal (never client-facing):_",
+              f"_buy cost €{e['buy_eur']:.2f}"
+              + (" (some sources unpriced)" if e["buy_unpriced"] else "")
+              + (f" · breakage €{e['breakage_eur']:.2f}" if e["breakage_eur"] is not None else "")
+              + (f" · margin €{e['margin_eur']:.2f}" if e["margin_eur"] is not None else "")
+              + "_"]
+    return "\n".join(lines) + "\n"

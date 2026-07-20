@@ -1276,6 +1276,7 @@ class SourceRatesIn(BaseModel):
     buy_in: float = 0
     buy_cached: float = 0
     buy_out: float = 0
+    cap_tokens: int | None = None   # monthly cap → source renders as a real tank
 
 
 @router.get("/ledger/summary")
@@ -1318,7 +1319,21 @@ def ledger_plan_set(name: str, body: PlanIn) -> dict[str, Any]:
 def ledger_source_rates(body: SourceRatesIn) -> dict[str, Any]:
     if not any(s["id"] == body.set_id for s in vault_mod.load_vault()["sets"]):
         raise HTTPException(status_code=404, detail=f"no vault set {body.set_id!r}")
-    return ledger_mod.set_source_rates(body.set_id, body.buy_in, body.buy_cached, body.buy_out)
+    return ledger_mod.set_source_rates(body.set_id, body.buy_in, body.buy_cached,
+                                       body.buy_out, body.cap_tokens)
+
+
+@router.get("/ledger/statement/{name}")
+def ledger_statement(name: str, month: str | None = None):
+    """Markdown usage statement for one client (current month by default,
+    ?month=YYYY-MM for history). Operator-facing; strip the _internal_
+    footer before anything goes to a clinic."""
+    data = ledger_mod.statement(name, month)
+    if data is None:
+        raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+    from fastapi.responses import PlainTextResponse
+    return PlainTextResponse(ledger_mod.statement_markdown(data),
+                             media_type="text/markdown; charset=utf-8")
 
 
 @router.post("/ledger/collect-now")

@@ -363,3 +363,30 @@ strong.down { color: var(--down); }
 .ledger-rate { width: 5.2rem; font-size: 0.78rem; }
 .ledger-rates-cell { white-space: nowrap; }
 .ledger-frozen-label { color: var(--down); font-weight: 600; }
+.ledger-fleet { font-size: 0.85rem; background: #f7f7fa; border: 1px solid #ececf0;
+  border-radius: 8px; padding: 0.5rem 0.8rem; }
+.ledger-alert { font-size: 0.8rem; color: var(--warn); padding: 0.15rem 0; }
+.ledger-alert-100 { color: var(--down); font-weight: 600; }
+.ledger-cap { width: 6.5rem; }
+
+/* -- Flow tab (flow.js) ---------------------------------------------------- */
+.flow-canvas { overflow-x: auto; }
+.flow-svg { width: 100%; max-width: 980px; display: block; margin: 0 auto; }
+.flow-col-title { font-size: 11px; letter-spacing: 0.12em; fill: #999;
+  text-anchor: middle; font-weight: 600; }
+.flow-tank { cursor: pointer; }
+.flow-tank:hover .flow-tank-shell { stroke: #666; }
+.flow-tank-shell { fill: #fdfdfe; stroke: #c9c9d4; stroke-width: 1.5; }
+.flow-tank-over .flow-tank-shell { stroke: var(--down); }
+.flow-tank-warn .flow-tank-shell { stroke: var(--warn); }
+.flow-label { font-size: 11px; fill: #555; text-anchor: middle; font-weight: 600; }
+.flow-value { font-size: 12px; fill: #333; text-anchor: middle; }
+.flow-sub { font-size: 10px; fill: #999; text-anchor: middle; }
+.flow-pipe { fill: none; stroke: #9fb6c9; opacity: 0.8; stroke-linecap: round; }
+.flow-pipe.flow-slow, .flow-pipe.flow-med, .flow-pipe.flow-fast {
+  stroke-dasharray: 7 5; animation: flowdash 1.2s linear infinite; }
+.flow-pipe.flow-slow { animation-duration: 2.4s; }
+.flow-pipe.flow-med { animation-duration: 1.2s; }
+.flow-pipe.flow-fast { animation-duration: 0.55s; stroke: #5b93b8; }
+@keyframes flowdash { to { stroke-dashoffset: -12; } }
+.flow-detail { margin-top: 1rem; border-top: 1px solid #ececf0; padding-top: 0.8rem; }

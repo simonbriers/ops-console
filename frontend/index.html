@@ -22,6 +22,7 @@
       <button class="tab" data-page="onboarding">Onboarding</button>
       <button class="tab" data-page="credentials">Credentials</button>
       <button class="tab" data-page="ledger">Tokens</button>
+      <button class="tab" data-page="flow">Flow</button>
       <button class="tab" data-page="host">Host / VPS</button>
       <button class="tab tab-right" id="settingsBtn">Settings</button>
     </nav>
@@ -293,10 +294,12 @@
           <button type="button" id="ledgerCollectBtn">Collect now</button>
           <span id="ledgerStatus" class="muted"></span>
         </div>
+        <p id="ledgerFleet" class="ledger-fleet"></p>
+        <div id="ledgerAlerts"></div>
         <table id="ledgerClients">
           <thead><tr><th>Client</th><th>Allowance</th><th>Used (month)</th>
-            <th>Left</th><th>Burn</th><th>Empty by</th><th></th></tr></thead>
-          <tbody id="ledgerClientsBody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+            <th>Left</th><th>Economics</th><th>Burn</th><th>Empty by</th><th></th></tr></thead>
+          <tbody id="ledgerClientsBody"><tr><td colspan="8" class="empty">Loading…</td></tr></tbody>
         </table>
       </section>
 
@@ -339,11 +342,29 @@
         Credentials → Reconcile).</p>
         <table id="ledgerSources">
           <thead><tr><th>Source</th><th>Drawn by</th><th>Usage (month)</th>
-            <th>Buy cost</th><th>Buy rates €/1k (in · cached · out)</th></tr></thead>
+            <th>Buy cost</th><th>Buy rates €/1k (in · cached · out) + monthly cap</th></tr></thead>
           <tbody id="ledgerSourcesBody"><tr><td colspan="5" class="empty">Loading…</td></tr></tbody>
         </table>
       </section>
     </div><!-- /page-ledger -->
+
+    <div id="page-flow" class="page hidden">
+      <section class="ob-panel">
+        <h3>Token flow — sources → clients</h3>
+        <p class="muted">The live water system: source tanks left (finite ones drain against
+        their monthly cap; ∞ = pay-as-you-go pipes; free-tier sources in green), client tanks
+        right (fill = % of plan allowance left; amber under 20%, red = overage territory).
+        Pipe thickness = share of this month's flow; pipe speed = that client's recent burn.
+        Click any tank to drill down. Data refreshes with the ledger (~5 min); numbers are
+        month-to-date.</p>
+        <div class="ob-form">
+          <button type="button" id="flowRefreshBtn">Refresh</button>
+          <span id="flowStatus" class="muted"></span>
+        </div>
+        <div id="flowCanvas" class="flow-canvas"></div>
+        <div id="flowDetail" class="flow-detail hidden"></div>
+      </section>
+    </div><!-- /page-flow -->
   </main>
 
   <!-- Detail modal -->
@@ -553,7 +574,9 @@
        provides refreshVault()/populateVaultClientSelect() that
        switchPage() calls. -->
   <script src="/static/credentials.js?v=vault2-7"></script>
-  <!-- Tokens tab (metering ledger, TOKEN_ECONOMY_PLAN.md Phase 2). -->
-  <script src="/static/ledger.js?v=ledger-1"></script>
+  <!-- Tokens tab (metering ledger, TOKEN_ECONOMY_PLAN.md Phases 2+3). -->
+  <script src="/static/ledger.js?v=ledger-2"></script>
+  <!-- Flow tab (tanks & pipes visual, Phase 4). -->
+  <script src="/static/flow.js?v=flow-1"></script>
 </body>
 </html>
