@@ -2,8 +2,8 @@
   "poll_interval_seconds": 60,
   "clients": [
     {
-      "name": "Main Clinic (chat.briers.eu)",
-      "base_url": "https://chat.briers.eu",
+      "name": "Primary demo (chat.my-ai-receptionist.com)",
+      "base_url": "https://chat.my-ai-receptionist.com",
       "ssh_target": "deploy@chat.briers.eu",
       "remote_dir": "~/dental-clinic-agent",
       "monthly_token_quota": 2000000,
@@ -22,6 +22,14 @@
       "ssh_target": "deploy@chat.briers.eu",
       "remote_dir": "~/clinica-valor",
       "monthly_token_quota": 500000,
+      "admin_token": "REPLACE_ME_OR_USE_FETCH_VIA_SSH"
+    },
+    {
+      "name": "acme (dev guinea pig)",
+      "base_url": "https://acme.my-ai-receptionist.com",
+      "ssh_target": "deploy@chat.briers.eu",
+      "remote_dir": "~/acme",
+      "monthly_token_quota": 0,
       "admin_token": "REPLACE_ME_OR_USE_FETCH_VIA_SSH"
     }
   ],
