@@ -988,11 +988,10 @@ def client_smoke(name: str) -> dict[str, Any]:
     return {"ok": all(r["ok"] for r in rows if r["check"] != "backup_timer"), "checks": rows}
 
 
-@router.post("/clients/{name}/validate-config")
-def client_validate_config(name: str) -> dict[str, Any]:
-    client = cfg.find_client(name)
-    if client is None:
-        raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+def _validate_live_config(client: dict[str, Any]) -> dict[str, Any]:
+    """Reads a client's LIVE /data/site_config.yaml out of its running app
+    container over SSH and runs the local validator on it. Shared by the
+    single validate endpoint below and the batch test runner."""
     shell = core._shell_remote_dir((client.get("remote_dir") or "").rstrip("/"))
     proj = core._project_name(client.get("remote_dir") or "")
     ok, out = core.run_ssh(client.get("ssh_target", ""),
@@ -1001,6 +1000,148 @@ def client_validate_config(name: str) -> dict[str, Any]:
     if not ok:
         return {"ok": False, "errors": [f"couldn't read live config: {out.strip()[-300:]}"], "warnings": []}
     return validator_mod.validate_yaml_text(out)
+
+
+@router.post("/clients/{name}/validate-config")
+def client_validate_config(name: str) -> dict[str, Any]:
+    client = cfg.find_client(name)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+    return _validate_live_config(client)
+
+
+class TestBatchIn(BaseModel):
+    names: list[str]
+
+
+@router.post("/test-batch")
+def test_batch(body: TestBatchIn) -> StreamingResponse:
+    """Runs the full check suite — the 8-check smoke suite (health, TLS,
+    admin API, CSP, a real chat round-trip, backup timer) plus live
+    site_config.yaml validation — across several clients in one request,
+    streaming NDJSON events in the same dialect as /deploy-batch:
+
+      {"type": "start",  "name"}                              a client began
+      {"type": "result", "name", ok, checks, config, summary}  a client done
+      {"type": "done",   "ok_count", "fail_count"}             always last
+
+    Per-client verdict mirrors the single smoke endpoint's: every check
+    except backup_timer must pass, AND the live config must have no
+    validation errors. backup_timer failures and config warnings are
+    carried as `summary.warnings` — reported, never fatal (the same
+    warn-not-fail bar the onboarding verify step uses).
+
+    No typed confirmation: everything here is read-only against the
+    monitored instances (the chat round-trip does burn a few LLM tokens
+    per client, which is the cost of actually proving the key works).
+    Concurrency is batch_stream's usual: parallel across hosts, strictly
+    sequential per host — the checks are SSH-heavy and the chat
+    round-trip alone can take ~30s per client."""
+    names = list(dict.fromkeys(n for n in body.names if n))
+    if not names:
+        raise HTTPException(status_code=400, detail="no client names given")
+    clients = []
+    for n in names:
+        client = cfg.find_client(n)
+        if client is None:
+            raise HTTPException(status_code=404,
+                                detail=f"No client named {n!r} — nothing was run")
+        clients.append(client)
+
+    def job(client: dict[str, Any]) -> dict[str, Any]:
+        checks = smoke_mod.run_smoke(client)
+        config_res = _validate_live_config(client)
+        critical_fails = [r["check"] for r in checks
+                          if not r["ok"] and r["check"] != "backup_timer"]
+        warnings: list[str] = []
+        if any(r["check"] == "backup_timer" and not r["ok"] for r in checks):
+            warnings.append("backup timer not active")
+        warnings.extend(f"config: {w}" for w in config_res.get("warnings") or [])
+        config_errors = config_res.get("errors") or []
+        ok = not critical_fails and not config_errors
+        return {
+            "ok": ok,
+            "checks": checks,
+            "config": config_res,
+            "summary": {
+                "passed": sum(1 for r in checks if r["ok"]),
+                "total": len(checks),
+                "failed_checks": critical_fails,
+                "config_errors": config_errors,
+                "warnings": warnings,
+            },
+            "error": None if ok else (
+                "; ".join(filter(None, [
+                    f"{len(critical_fails)} check(s) failing: {', '.join(critical_fails)}" if critical_fails else "",
+                    f"{len(config_errors)} config error(s)" if config_errors else "",
+                ]))),
+        }
+
+    def gen():
+        try:
+            yield from core.batch_stream(clients, job)
+        except Exception as exc:  # noqa: BLE001 — same defensive rationale as
+            # /deploy-batch: any unexpected crash becomes a diagnosable final
+            # event instead of the connection dying mid-stream.
+            yield {"type": "done", "ok_count": 0, "fail_count": len(clients),
+                   "error": f"unexpected error ({type(exc).__name__}): {exc}"}
+
+    return _ndjson(gen())
+
+
+class BackupBatchIn(BaseModel):
+    names: list[str]
+    # Same belt-and-suspenders shape as /deploy-batch: this mutates the
+    # instances' hosts (installs systemd units, runs a backup), so it takes
+    # one typed confirmation — "backups <count>" — checked server-side.
+    confirm: str
+
+
+@router.post("/backup-batch")
+def backup_batch(body: BackupBatchIn) -> StreamingResponse:
+    """Installs/repairs the nightly encrypted-backup timer on each selected
+    client's VPS and PROVES it with an immediate real backup run — see
+    core.setup_backup for the stages and the incident that made "prove it"
+    non-optional (a timer that fired nightly for 17 days producing nothing).
+    Streams the same NDJSON dialect as /deploy-batch and /test-batch; each
+    result is appended to deploy_log.jsonl (action "backup-setup") since
+    this mutates the instances' hosts. Idempotent — safe to re-run on a
+    client that's already set up (it just takes another backup)."""
+    names = list(dict.fromkeys(n for n in body.names if n))
+    if not names:
+        raise HTTPException(status_code=400, detail="no client names given")
+    expected = f"backups {len(names)}"
+    if body.confirm.strip().lower() != expected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"confirmation text did not match {expected!r} — nothing was touched")
+    clients = []
+    for n in names:
+        client = cfg.find_client(n)
+        if client is None:
+            raise HTTPException(status_code=404,
+                                detail=f"No client named {n!r} — nothing was touched")
+        clients.append(client)
+
+    def gen():
+        try:
+            for event in core.batch_stream(clients, core.setup_backup):
+                if event.get("type") == "result":
+                    deploy_log.append({
+                        "name": event.get("name"),
+                        "requested_at": datetime.now().isoformat(timespec="seconds"),
+                        "ok": event.get("ok"),
+                        "stage": event.get("stage"),
+                        "commit": None,
+                        "error": event.get("error"),
+                        "action": "backup-setup",
+                    })
+                yield event
+        except Exception as exc:  # noqa: BLE001 — same rationale as the others
+            yield {"type": "done", "ok_count": 0, "fail_count": len(clients),
+                   "error": f"unexpected error ({type(exc).__name__}): {exc}"}
+
+    return _ndjson(gen())
 
 
 # --- credentials vault ------------------------------------------------------

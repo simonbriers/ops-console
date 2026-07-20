@@ -255,3 +255,75 @@ form input { width: 100%; padding: 0.4rem 0.5rem; margin-top: 0.25rem; border: 1
 .upd-running { color: var(--warn); font-weight: 600; }
 #updConfirmArea { margin: 0 0 12px; }
 #updConsole { max-height: 320px; }
+
+/* === Tests tab === */
+#testTable tbody tr { cursor: default; }
+#testTable td { vertical-align: top; }
+#testTable input[type="checkbox"] { width: auto; }
+.test-name { color: inherit; font-weight: 600; text-decoration: none; }
+.test-name:hover { text-decoration: underline; }
+.test-result-cell { max-width: 520px; }
+#testConsole { max-height: 320px; }
+
+/* Generic hidden toggle — show()/hide() in app.js flip this class on ALL
+   kinds of elements (consoles, confirm areas, inline inputs), but only
+   .modal.hidden / .page.hidden rules ever existed, so everything else
+   "hidden" was actually visible (e.g. the onboarding console rendering as
+   a permanent empty black bar). !important so it beats any display set by
+   a component's own rule regardless of order/specificity. */
+.hidden { display: none !important; }
+
+/* === Client detail modal (premium layout) === */
+.modal-box.detail-box { width: 980px; max-width: 96vw; }
+
+.detail-head { display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 1rem; margin: 0 1.5rem 0 0; }
+.detail-head-id h2 { margin: 0 0 0.15rem; }
+.detail-url { font-size: 0.85rem; color: #16b9a8; text-decoration: none; }
+.detail-url:hover { text-decoration: underline; }
+.detail-url.hidden { display: none; }
+.detail-head-status { text-align: right; }
+.detail-head-status .status-pill { margin-bottom: 0.25rem; }
+.detail-head-status p { margin: 0; }
+
+.detail-alert { border-radius: 6px; padding: 0.5rem 0.8rem; margin-top: 0.75rem;
+  font-size: 0.85rem; }
+.detail-alert.down { background: #fdecea; color: var(--down); border: 1px solid #f2c4bd; }
+.detail-alert.warn { background: #fff6e0; color: #7a5c00; border: 1px solid #e8d192; }
+.detail-alert + .detail-alert { margin-top: 0.4rem; }
+
+.detail-glance { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+  gap: 0.6rem; margin: 1rem 0 1.1rem; }
+.glance-tile { background: #f7f8fa; border: 1px solid #ececf0; border-radius: 8px;
+  padding: 0.65rem 0.75rem 0.55rem; }
+.glance-value { font-size: 1.15rem; font-weight: 650; color: #1a1a2e; line-height: 1.25;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.glance-value code { font-size: 0.95rem; background: none; }
+.glance-value.warn { color: var(--warn); }
+.glance-value.down { color: var(--down); }
+.glance-value.muted { color: #999; }
+.glance-value .ok { color: var(--ok); }
+.glance-value .down { color: var(--down); }
+.glance-label { font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.04em;
+  color: #888; margin-top: 0.2rem; }
+.glance-sub { font-size: 0.75rem; color: #999; margin-top: 0.1rem; min-height: 0.9rem; }
+
+.detail-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 0.8rem; }
+.detail-card { background: #fff; border: 1px solid #ececf0; border-radius: 8px;
+  padding: 0.8rem 1rem 0.9rem; margin: 0; }
+.detail-card-wide { grid-column: 1 / -1; }
+.detail-card h3 { margin: 0 0 0.5rem; }
+@media (max-width: 760px) { .detail-cols { grid-template-columns: 1fr; } }
+
+.kv-row { display: flex; justify-content: space-between; gap: 1rem;
+  padding: 0.22rem 0; font-size: 0.85rem; border-bottom: 1px solid #f3f3f6; }
+.kv-row:last-child { border-bottom: none; }
+.kv-key { color: #888; flex: none; }
+.kv-row .ok { color: var(--ok); }
+.kv-row .down { color: var(--down); }
+strong.down { color: var(--down); }
+.ok { color: var(--ok); }
+.down { color: var(--down); }
+
+.detail-actions { border-top: 1px solid #ececf0; padding-top: 0.9rem; margin-top: 1.1rem; }
+.detail-actions-spacer { flex: 1; }

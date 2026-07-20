@@ -482,6 +482,13 @@ def deploy_client(client: dict[str, Any]) -> dict[str, Any]:
     )
     cmd = (
         f"echo '{_MARK_DEPLOY_PULL}'; "
+        # Name any local changes up front — a dirty tree makes the ff-only
+        # pull refuse (correctly), but git's own "commit your changes or
+        # stash them" message doesn't say WHICH file, which cost a real
+        # diagnosis round trip (2026-07-20: our own backup-setup's chmod +x
+        # dirtied deploy/backup.sh's mode bit on every instance because the
+        # repo shipped it non-executable).
+        f"git -C {remote_dir} status --porcelain 2>/dev/null | sed 's/^/local change: /'; "
         f"git -C {remote_dir} fetch -q origin 2>&1 && git -C {remote_dir} pull --ff-only origin master 2>&1; "
         f"pull_status=$?; "
         f"{setup_script}; "
@@ -584,29 +591,29 @@ def restart_container(ssh_target: str, remote_dir: str) -> dict[str, Any]:
     return {"ok": True, "error": None, "output": output.strip()[-2000:]}
 
 
-def deploy_batch_stream(clients: list[dict[str, Any]]):
-    """Deploys several clients in one run, yielding progress events as they
-    happen (a generator, so the API layer can stream them live):
+def batch_stream(clients: list[dict[str, Any]], job):
+    """Runs `job(client)` for several clients in one run, yielding progress
+    events as they happen (a generator, so the API layer can stream them
+    live). `job` must return a dict with at least an "ok" bool — its whole
+    result is spread into that client's result event:
 
-      {"type": "start",  "name": ...}                          one per client
-      {"type": "result", "name": ..., <deploy_client fields>}  one per client
-      {"type": "done",   "ok_count": N, "fail_count": M}       always last
+      {"type": "start",  "name": ...}                   one per client
+      {"type": "result", "name": ..., <job's fields>}   one per client
+      {"type": "done",   "ok_count": N, "fail_count": M}  always last
 
     Concurrency model: grouped by ssh_target — clients on DIFFERENT hosts
-    deploy in parallel (capped at MAX_PARALLEL_DEPLOY_HOSTS), but clients
-    SHARING a host deploy strictly one at a time. A `docker compose build`
-    is genuinely heavy for a small VPS (CPU/RAM/disk all at once), and the
+    run in parallel (capped at MAX_PARALLEL_DEPLOY_HOSTS), but clients
+    SHARING a host run strictly one at a time. Written for batch deploys
+    (a `docker compose build` is genuinely heavy for a small VPS, and the
     clients most likely to be batch-updated together are exactly the ones
-    sharing a box — kicking off several builds on one host simultaneously
-    is how a routine update becomes an outage. Per-client safety is
-    unchanged: every deploy still goes through deploy_client() with all of
-    its gates (ff-only pull, build-before-restart, the container-name
-    collision precheck).
+    sharing a box — several simultaneous builds on one host is how a
+    routine update becomes an outage) and reused as-is for the batch test
+    runner, whose SSH-heavy checks benefit from the same discipline.
 
-    Never raises, and can never hang the stream: deploy_client itself never
-    raises, and the worker wraps it anyway so an unforeseen bug still emits
-    a failed result event for that client instead of silently eating it
-    (the generator counts result events to know when it's finished)."""
+    Never raises, and can never hang the stream: the worker wraps job() so
+    an unforeseen bug still emits a failed result event for that client
+    instead of silently eating it (the generator counts result events to
+    know when it's finished)."""
     if not clients:
         yield {"type": "done", "ok_count": 0, "fail_count": 0}
         return
@@ -615,7 +622,7 @@ def deploy_batch_stream(clients: list[dict[str, Any]]):
     groups: dict[str, list[dict[str, Any]]] = {}
     for idx, client in enumerate(clients):
         # A client with no ssh_target still gets its own group so it flows
-        # through deploy_client and comes back as a normal per-client config
+        # through the job and comes back as a normal per-client config
         # error, never a silent skip.
         key = client.get("ssh_target") or f"__no-ssh-target-{idx}"
         groups.setdefault(key, []).append(client)
@@ -625,7 +632,7 @@ def deploy_batch_stream(clients: list[dict[str, Any]]):
             name = client.get("name") or client.get("base_url") or "?"
             events.put({"type": "start", "name": name})
             try:
-                result = deploy_client(client)
+                result = job(client)
             except Exception as exc:  # noqa: BLE001 — see docstring
                 result = {"ok": False, "stage": "internal",
                           "error": f"unexpected error ({type(exc).__name__}): {exc}",
@@ -648,6 +655,161 @@ def deploy_batch_stream(clients: list[dict[str, Any]]):
                     fail_count += 1
             yield event
     yield {"type": "done", "ok_count": ok_count, "fail_count": fail_count}
+
+
+def deploy_batch_stream(clients: list[dict[str, Any]]):
+    """Batch deploy = the generic runner with deploy_client as the job.
+    See batch_stream for the event dialect and the per-host concurrency
+    rationale; per-client safety is unchanged — every deploy still goes
+    through deploy_client() with all of its gates (ff-only pull,
+    build-before-restart, the container-name collision precheck)."""
+    yield from batch_stream(clients, deploy_client)
+
+
+# --------------------------------------------------------------------------
+# Backup setup — installs/repairs the nightly encrypted-backup systemd timer
+# on a client's VPS, then PROVES it by running a real backup immediately and
+# checking a fresh archive landed. Born from a real incident (2026-07-20):
+# the primary's backup timer had fired nightly for 17 days while producing
+# nothing — the unit pointed at a nonexistent /opt path (status=203/EXEC,
+# zero journal output), and once that was fixed, a malformed .env line
+# killed the script anyway. "Timer active" alone proves nothing; only a
+# fresh archive on disk does, which is why the test run is not optional.
+# --------------------------------------------------------------------------
+
+BACKUP_SETUP_TIMEOUT = 240  # includes a real backup run (sqlite snapshot + gpg)
+_MARK_BK_PRECHECK = "===OPSCONSOLE_BK_PRECHECK==="
+_MARK_BK_INSTALL = "===OPSCONSOLE_BK_INSTALL==="
+_MARK_BK_RUN = "===OPSCONSOLE_BK_RUN==="
+_MARK_BK_STATUS = "===OPSCONSOLE_BK_STATUS==="
+
+
+def setup_backup(client: dict[str, Any]) -> dict[str, Any]:
+    """One SSH round trip: precheck (BACKUP_PASSPHRASE present in .env,
+    passwordless sudo available, deploy/backup.sh exists) → install
+    correctly-named unit files (<checkout-dir>-backup.service/.timer, paths
+    derived from the client's own remote_dir — the naming the smoke suite's
+    backup_timer check expects) → enable the timer → run a real backup NOW
+    via systemd → verify the archive count in {remote_dir}/backups grew.
+    Idempotent: re-running overwrites the units with identical content and
+    just takes another backup. Each stage gates the next; a precheck
+    failure installs nothing. Requires the SSH user to have passwordless
+    sudo (deploy/setup-server.sh on the product side grants exactly this).
+    Never raises."""
+    ssh_target = client.get("ssh_target") or None
+    remote_dir = (client.get("remote_dir") or "").rstrip("/") or None
+    empty = {"ok": False, "error": None, "stage": None, "output": "",
+             "timer": None, "archives": None, "newest": None, "verified": False}
+    if not ssh_target or not remote_dir:
+        return {**empty, "error": "no ssh_target/remote_dir configured", "stage": "config"}
+    shell_dir = _shell_remote_dir(remote_dir)
+    name = _project_name(shell_dir)
+
+    cmd = f'''dir={shell_dir}; name={name}
+echo '{_MARK_BK_PRECHECK}'
+pass_ok=0; grep -Eq '^BACKUP_PASSPHRASE=..+' "$dir/.env" 2>/dev/null && pass_ok=1
+[ $pass_ok -eq 1 ] && echo 'BACKUP_PASSPHRASE: present' || echo 'BACKUP_PASSPHRASE: MISSING or empty in .env'
+sudo_ok=0; sudo -n true 2>/dev/null && sudo_ok=1
+[ $sudo_ok -eq 1 ] && echo 'passwordless sudo: ok' || echo 'passwordless sudo: NOT available for this SSH user'
+script_ok=0; [ -f "$dir/deploy/backup.sh" ] && script_ok=1 && chmod +x "$dir/deploy/backup.sh" 2>/dev/null
+[ $script_ok -eq 1 ] && echo 'deploy/backup.sh: present' || echo 'deploy/backup.sh: MISSING'
+echo '{_MARK_BK_INSTALL}'
+install_ok=0
+if [ $pass_ok -eq 1 ] && [ $sudo_ok -eq 1 ] && [ $script_ok -eq 1 ]; then
+sudo -n tee /etc/systemd/system/$name-backup.service >/dev/null <<UNITEOF
+[Unit]
+Description=Encrypted backup of $name
+Wants=network-online.target
+After=network-online.target docker.service
+[Service]
+Type=oneshot
+WorkingDirectory=$dir
+ExecStart=$dir/deploy/backup.sh
+StandardOutput=journal
+StandardError=journal
+UNITEOF
+sudo -n tee /etc/systemd/system/$name-backup.timer >/dev/null <<UNITEOF
+[Unit]
+Description=Nightly encrypted backup for $name
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=600
+Persistent=true
+[Install]
+WantedBy=timers.target
+UNITEOF
+sudo -n systemctl daemon-reload 2>&1 && sudo -n systemctl enable --now $name-backup.timer 2>&1 && install_ok=1
+echo "unit files written + timer enabled: install_ok=$install_ok"
+else echo 'skipped - precheck failed, nothing was installed'; fi
+echo '{_MARK_BK_RUN}'
+run_ok=0; before=0; after=0; newest=''
+if [ $install_ok -eq 1 ]; then
+before=$(ls -1 "$dir"/backups/*.tar.gz.gpg 2>/dev/null | wc -l)
+sudo -n systemctl start $name-backup.service 2>&1 && run_ok=1
+after=$(ls -1 "$dir"/backups/*.tar.gz.gpg 2>/dev/null | wc -l)
+newest=$(ls -1t "$dir"/backups/*.tar.gz.gpg 2>/dev/null | head -1)
+if [ $run_ok -eq 0 ]; then echo '--- journal tail ---'; sudo -n journalctl -u $name-backup.service -n 20 --no-pager 2>/dev/null; fi
+else echo 'skipped'; fi
+echo '{_MARK_BK_STATUS}'
+timer_state=$(systemctl is-active $name-backup.timer 2>/dev/null)
+echo "pass=$pass_ok sudo=$sudo_ok script=$script_ok install=$install_ok run=$run_ok before=$before after=$after timer=$timer_state newest=$newest"
+'''
+    ok, output = run_ssh(ssh_target, cmd, timeout=BACKUP_SETUP_TIMEOUT)
+    if not ok:
+        return {**empty, "error": output.strip()[-1000:] or "ssh failed", "stage": "ssh"}
+
+    try:
+        after_pre = output.split(_MARK_BK_PRECHECK, 1)[1]
+        pre_text, after_install = after_pre.split(_MARK_BK_INSTALL, 1)
+        install_text, after_run = after_install.split(_MARK_BK_RUN, 1)
+        run_text, status_text = after_run.split(_MARK_BK_STATUS, 1)
+    except (IndexError, ValueError):
+        return {**empty, "error": "could not parse backup-setup output from remote",
+                "stage": "parse", "output": output.strip()[-3000:]}
+
+    m = re.search(r"pass=(\d) sudo=(\d) script=(\d) install=(\d) run=(\d) "
+                  r"before=(\d+) after=(\d+) timer=(\S*) newest=(.*)", status_text)
+    combined = (f"--- precheck ---\n{pre_text.strip()}\n\n"
+                f"--- install ---\n{install_text.strip()}\n\n"
+                f"--- test backup run ---\n{run_text.strip()}")[-3000:]
+    if not m:
+        return {**empty, "error": "could not determine backup-setup stage results",
+                "stage": "parse", "output": combined}
+    pass_ok, sudo_ok, script_ok, install_ok, run_ok = (m.group(i) == "1" for i in range(1, 6))
+    before, after = int(m.group(6)), int(m.group(7))
+    timer_state = m.group(8) or None
+    newest = m.group(9).strip() or None
+    base = {**empty, "output": combined, "timer": timer_state,
+            "archives": after, "newest": newest}
+
+    if not pass_ok:
+        return {**base, "stage": "passphrase",
+                "error": "no BACKUP_PASSPHRASE in this instance's .env — set one via the "
+                         "Credentials tool first (and store it in a password manager: without "
+                         "it, backups are unrecoverable). Nothing was installed."}
+    if not sudo_ok:
+        return {**base, "stage": "sudo",
+                "error": "the SSH user has no passwordless sudo on this host, which installing "
+                         "systemd units requires — run deploy/setup-server.sh's sudoers step "
+                         "there, or install the units by hand (DEPLOYMENT.md §7)."}
+    if not script_ok:
+        return {**base, "stage": "script",
+                "error": "deploy/backup.sh not found in this client's checkout — deploy the "
+                         "latest code to it first (Updates tab), then re-run this."}
+    if not install_ok:
+        return {**base, "stage": "install",
+                "error": "writing/enabling the systemd units failed — see output."}
+    if not run_ok:
+        return {**base, "stage": "run",
+                "error": "units installed and timer enabled, but the immediate test backup "
+                         "FAILED — see output (journal tail included). The timer will keep "
+                         "failing the same way nightly until this is fixed."}
+
+    verified = after > before
+    return {**base, "ok": True, "stage": "done", "verified": verified,
+            "error": None if verified else
+            "backup ran cleanly but the archive count did not grow — check the backups "
+            "directory manually (a same-second retention prune can cause this)."}
 
 
 # --------------------------------------------------------------------------

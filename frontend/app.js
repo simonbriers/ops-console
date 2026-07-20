@@ -227,6 +227,7 @@ function renderTable() {
   if (latestResults.length === 0) {
     tbody.innerHTML = `<tr><td colspan="8" class="empty">No clients configured yet — click "Add client" to start monitoring one.</td></tr>`;
     renderUpdatesPage();
+    renderTestsPage();
     return;
   }
   tbody.innerHTML = latestResults
@@ -249,6 +250,7 @@ function renderTable() {
   });
   renderImpactPanel();
   renderUpdatesPage();
+  renderTestsPage();
 }
 
 function renderImpactPanel() {
@@ -352,32 +354,138 @@ async function startPolling() {
 
 // -- detail modal ----------------------------------------------------------
 
+function fmtCompact(n) {
+  if (n == null) return "—";
+  if (n >= 1e6) return (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + "M";
+  if (n >= 1e3) return (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + "K";
+  return String(n);
+}
+
+// One stat tile for the at-a-glance strip. Status is never color alone:
+// the value carries a glyph (● / ○ / ⚠) alongside the tint.
+function glanceTile(label, value, cls, sub) {
+  return `<div class="glance-tile">
+    <div class="glance-value ${cls || ""}">${value}</div>
+    <div class="glance-label">${escapeHtml(label)}</div>
+    <div class="glance-sub">${sub || ""}</div>
+  </div>`;
+}
+
+function renderDetailGlance(r) {
+  const h = r.health || {};
+  const v = r.version || {};
+  const u = r.usage || {};
+  const i = r.interactions || {};
+  const c = r.cost || {};
+  const up = r.uptime || {};
+  const tiles = [];
+
+  // Health
+  tiles.push(h.up
+    ? glanceTile("Health", `<span class="ok">●</span> UP`, "",
+        `${h.latency_ms}ms${h.voice_enabled ? ` · ${h.voice_active_sessions} voice` : ""}`)
+    : glanceTile("Health", `<span class="down">●</span> DOWN`, "down", "not answering"));
+
+  // Version
+  if (v.ok) {
+    const behind = v.behind || 0;
+    tiles.push(glanceTile("Version", `<code>${escapeHtml(v.commit || "?")}</code>`,
+      behind ? "warn" : "",
+      behind ? `⚠ ${behind} commit${behind === 1 ? "" : "s"} behind` : "up to date"));
+  } else {
+    tiles.push(glanceTile("Version", "?", "muted", "no SSH check"));
+  }
+
+  // Uptime 7d
+  if (up.uptime_7d_pct != null) {
+    const cls = up.uptime_7d_pct >= 99 ? "" : up.uptime_7d_pct >= 95 ? "warn" : "down";
+    tiles.push(glanceTile("Uptime 7d", `${up.uptime_7d_pct}%`, cls,
+      up.latency_p95_ms != null ? `p95 ${up.latency_p95_ms}ms` : `${up.samples_7d} samples`));
+  } else {
+    tiles.push(glanceTile("Uptime 7d", "—", "muted", "no history yet"));
+  }
+
+  // Tokens this month
+  if (u.ok) {
+    const quotaSub = r.quota
+      ? `${Math.round((u.total_tokens / r.quota) * 100)}% of quota`
+      : "no quota set";
+    tiles.push(glanceTile("Tokens (mo)", fmtCompact(u.total_tokens),
+      r.over_quota ? "down" : "", r.over_quota ? "⚠ over quota" : quotaSub));
+  } else {
+    tiles.push(glanceTile("Tokens (mo)", "—", "muted", "unavailable"));
+  }
+
+  // Chats + time saved
+  tiles.push(glanceTile("Chats (mo)", u.ok ? String(u.chats) : "—", u.ok ? "" : "muted",
+    i.ok ? `${fmtHM(i.minutes_saved)} saved` : ""));
+
+  // Cost (only when configured)
+  if (c.ok && c.configured) {
+    tiles.push(glanceTile("Est. cost (mo)", `$${c.estimated_usd.toFixed(2)}`, "", "from configured rates"));
+  }
+
+  $("detailGlance").innerHTML = tiles.join("");
+}
+
+function renderDetailAlert(r) {
+  const el = $("detailAlert");
+  const alerts = [];
+  const h = r.health || {};
+  if (!h.up) {
+    alerts.push(`<div class="detail-alert down">● DOWN — ${escapeHtml(h.error || "health check failed")}</div>`);
+  }
+  if (r.over_quota) {
+    alerts.push(`<div class="detail-alert down">⚠ Over the monthly token quota — billable overage.</div>`);
+  }
+  if ((r.version || {}).ok && r.version.infra_risk) {
+    alerts.push(`<div class="detail-alert warn">⚠ Pending commits touch infrastructure files
+      (${(r.version.infra_files || []).map(escapeHtml).join(", ")}) — review before deploying.</div>`);
+  }
+  el.innerHTML = alerts.join("");
+}
+
 function applyDetail(r) {
   $("detailModal").dataset.name = r.name;
   $("detailName").textContent = r.name;
+  const base = ((r.client || {}).base_url || "").replace(/\/+$/, "");
+  const urlEl = $("detailUrl");
+  if (base) {
+    urlEl.textContent = base.replace(/^https?:\/\//, "");
+    urlEl.href = base;
+    urlEl.classList.remove("hidden");
+  } else {
+    urlEl.textContent = "";
+    urlEl.classList.add("hidden");
+  }
   const pill = $("detailStatus");
   pill.textContent = r.status.toUpperCase();
   pill.className = `status-pill ${r.status}`;
+  $("detailChecked").textContent = "Last checked " + (r.checked_at || "—").replace("T", " ");
 
-  $("detailHealth").textContent = fmtHealth(r.health);
+  renderDetailAlert(r);
+  renderDetailGlance(r);
 
   const v = r.version;
-  let versionHtml = fmtVersion(v);
-  if (v.ok && v.infra_risk) {
-    const files = (v.infra_files || []).map((f) => `<li>${escapeHtml(f)}</li>`).join("");
-    versionHtml += `<div class="infra-warning">⚠ Includes changes to infrastructure files — review before deploying:<ul>${files}</ul></div>`;
+  let versionHtml;
+  if (v.ok) {
+    versionHtml = `<div class="kv-row"><span class="kv-key">Running</span><span><code>${escapeHtml(v.commit || "?")}</code>${v.behind ? ` — ${v.behind} commit${v.behind === 1 ? "" : "s"} behind origin/master` : " — up to date"}</span></div>`;
+  } else {
+    versionHtml = `<div class="kv-row"><span class="kv-key">Running</span><span class="muted">unknown — ${escapeHtml(v.error || "check failed")}</span></div>`;
   }
   if (v.ok && v.behind_commits && v.behind_commits.length) {
-    const shown = v.behind_commits
-      .map((line) => `<li>${escapeHtml(line)}</li>`)
-      .join("");
+    const shown = v.behind_commits.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
     const truncatedNote = v.behind > v.behind_commits.length
       ? `<p class="muted">…and ${v.behind - v.behind_commits.length} more not shown.</p>` : "";
-    versionHtml += `<p class="muted" style="margin:0.5rem 0 0.2rem;">What's not deployed yet:</p>` +
-      `<ul class="behind-commits">${shown}</ul>${truncatedNote}`;
+    versionHtml += `<details class="upd-commits"${v.behind <= 5 ? " open" : ""}><summary>What's not deployed yet</summary>
+      <ul class="behind-commits">${shown}</ul>${truncatedNote}</details>`;
   }
   if (v.ok && v.containers && v.containers.length) {
-    versionHtml += "<br>" + v.containers.map((c) => `${escapeHtml(c.name)}: ${escapeHtml(c.state)} ${escapeHtml(c.health || "")}`).join("<br>");
+    versionHtml += v.containers.map((c) => {
+      const running = (c.state || "").toLowerCase() === "running";
+      return `<div class="kv-row"><span class="kv-key">${escapeHtml(c.name)}</span>
+        <span><span class="${running ? "ok" : "down"}">●</span> ${escapeHtml(c.state)} ${escapeHtml(c.health || "")}</span></div>`;
+    }).join("");
   }
   $("detailVersion").innerHTML = versionHtml;
   renderDeployArea(r);
@@ -385,71 +493,74 @@ function applyDetail(r) {
   const u = r.usage;
   let usageHtml;
   if (u.ok) {
-    usageHtml = `Chats: ${u.chats}<br>Tokens — input: ${u.input_tokens.toLocaleString()}, cached: ${u.cached_tokens.toLocaleString()}, output: ${u.output_tokens.toLocaleString()}<br>Total: ${u.total_tokens.toLocaleString()}`;
-    if (r.quota) {
-      usageHtml += `<br>Quota: ${r.quota.toLocaleString()} tokens/month`;
-      if (r.over_quota) usageHtml += "<br><strong>*** OVER QUOTA — billable overage ***</strong>";
-    } else {
-      usageHtml += "<br>No quota configured.";
+    usageHtml =
+      `<div class="kv-row"><span class="kv-key">Chats</span><span>${u.chats}</span></div>` +
+      `<div class="kv-row"><span class="kv-key">Input</span><span>${u.input_tokens.toLocaleString()} tok</span></div>` +
+      `<div class="kv-row"><span class="kv-key">Cached</span><span>${u.cached_tokens.toLocaleString()} tok</span></div>` +
+      `<div class="kv-row"><span class="kv-key">Output</span><span>${u.output_tokens.toLocaleString()} tok</span></div>` +
+      `<div class="kv-row"><span class="kv-key">Total</span><span><strong>${u.total_tokens.toLocaleString()} tok</strong></span></div>` +
+      `<div class="kv-row"><span class="kv-key">Quota</span><span>${r.quota ? r.quota.toLocaleString() + " tok/mo" + (r.over_quota ? ' — <strong class="down">over quota</strong>' : "") : '<span class="muted">none configured</span>'}</span></div>`;
+    const c = r.cost || {};
+    if (c.ok && c.configured) {
+      usageHtml += `<div class="kv-row"><span class="kv-key">Est. cost</span><span>$${c.estimated_usd.toFixed(4)}</span></div>`;
+    } else if (c.ok) {
+      usageHtml += `<div class="kv-row"><span class="kv-key">Est. cost</span><span class="muted">no rate configured</span></div>`;
     }
   } else {
-    usageHtml = `unknown — ${escapeHtml(u.error || "check failed")}`;
+    usageHtml = `<span class="muted">unknown — ${escapeHtml(u.error || "check failed")}</span>`;
   }
   $("detailUsage").innerHTML = usageHtml;
 
   const bar = $("detailQuotaBar");
-  const pct = r.quota ? Math.min(100, (u.total_tokens / r.quota) * 100) : 0;
+  const pct = r.quota && u.ok ? Math.min(100, (u.total_tokens / r.quota) * 100) : 0;
   bar.style.width = pct + "%";
   bar.className = "progress-fill" + (r.over_quota ? " over" : "");
+  bar.parentElement.style.display = r.quota ? "" : "none";
 
   const res = r.resources || {};
   let resourcesHtml;
   if (res.ok) {
-    const containerLines = (res.containers || [])
-      .map((c) => `${escapeHtml(c.name)}: cpu ${c.cpu_pct != null ? c.cpu_pct + "%" : "?"}, mem ${c.mem_pct != null ? c.mem_pct + "%" : "?"} (${escapeHtml(c.mem_usage || "")})`)
-      .join("<br>");
-    resourcesHtml = containerLines || "No containers found.";
-    if (res.data_disk_usage) resourcesHtml += `<br>/data usage: ${escapeHtml(res.data_disk_usage)}`;
+    resourcesHtml = (res.containers || []).map((c) =>
+      `<div class="kv-row"><span class="kv-key">${escapeHtml(c.name)}</span>
+       <span>cpu ${c.cpu_pct != null ? c.cpu_pct + "%" : "?"} · mem ${c.mem_pct != null ? c.mem_pct + "%" : "?"} <span class="muted">(${escapeHtml(c.mem_usage || "")})</span></span></div>`
+    ).join("") || `<span class="muted">No containers found.</span>`;
+    if (res.data_disk_usage) {
+      resourcesHtml += `<div class="kv-row"><span class="kv-key">/data</span><span>${escapeHtml(res.data_disk_usage)}</span></div>`;
+    }
   } else {
-    resourcesHtml = `unknown — ${escapeHtml(res.error || "check failed")}`;
+    resourcesHtml = `<span class="muted">unknown — ${escapeHtml(res.error || "check failed")}</span>`;
   }
   $("detailResources").innerHTML = resourcesHtml;
 
   const i = r.interactions || {};
   let interactionsHtml;
   if (i.ok) {
-    interactionsHtml = `Bookings: ${i.bookings}<br>Reschedules: ${i.reschedules}<br>Cancellations: ${i.cancellations}<br>` +
-      `Callbacks (human handoff): ${i.callbacks}<br>Registrations: ${i.registrations}` +
-      (i.other ? `<br>Other audited actions: ${i.other}` : "") +
-      `<br><strong>Est. receptionist time saved: ${fmtHM(i.minutes_saved)}</strong>`;
+    interactionsHtml =
+      `<div class="kv-row"><span class="kv-key">Bookings</span><span>${i.bookings}</span></div>` +
+      `<div class="kv-row"><span class="kv-key">Reschedules</span><span>${i.reschedules}</span></div>` +
+      `<div class="kv-row"><span class="kv-key">Cancellations</span><span>${i.cancellations}</span></div>` +
+      `<div class="kv-row"><span class="kv-key">Callbacks</span><span>${i.callbacks}</span></div>` +
+      `<div class="kv-row"><span class="kv-key">Registrations</span><span>${i.registrations}</span></div>` +
+      (i.other ? `<div class="kv-row"><span class="kv-key">Other</span><span>${i.other}</span></div>` : "") +
+      `<div class="kv-row"><span class="kv-key">Time saved</span><span><strong>${fmtHM(i.minutes_saved)}</strong></span></div>`;
   } else {
-    interactionsHtml = `unknown — ${escapeHtml(i.error || "check failed")}`;
+    interactionsHtml = `<span class="muted">unknown — ${escapeHtml(i.error || "check failed")}</span>`;
   }
   $("detailInteractions").innerHTML = interactionsHtml;
-
-  const c = r.cost || {};
-  let costHtml;
-  if (!c.ok) {
-    costHtml = `unknown — ${escapeHtml(c.error || "check failed")}`;
-  } else if (!c.configured) {
-    costHtml = `<span class="muted">No cost-per-token rate configured for this client — edit it to see an estimate.</span>`;
-  } else {
-    costHtml = `$${c.estimated_usd.toFixed(4)} this month (from configured rates)`;
-  }
-  $("detailCost").innerHTML = costHtml;
 
   const up = r.uptime || {};
   let uptimeHtml;
   if (up.uptime_7d_pct == null) {
-    uptimeHtml = `<span class="muted">Not enough history yet — ops-console records a sample on every poll.</span>`;
+    uptimeHtml = `<span class="muted">Not enough history yet — a sample is recorded on every poll.</span>`;
   } else {
-    uptimeHtml = `Last 24h: ${up.uptime_24h_pct != null ? up.uptime_24h_pct + "%" : "—"} (${up.samples_24h} samples)<br>` +
-      `Last 7d: ${up.uptime_7d_pct}% (${up.samples_7d} samples)`;
-    if (up.latency_p50_ms != null) uptimeHtml += `<br>Latency p50: ${up.latency_p50_ms}ms, p95: ${up.latency_p95_ms}ms`;
+    uptimeHtml =
+      `<div class="kv-row"><span class="kv-key">Last 24h</span><span>${up.uptime_24h_pct != null ? up.uptime_24h_pct + "%" : "—"} <span class="muted">(${up.samples_24h} samples)</span></span></div>` +
+      `<div class="kv-row"><span class="kv-key">Last 7d</span><span>${up.uptime_7d_pct}% <span class="muted">(${up.samples_7d} samples)</span></span></div>`;
+    if (up.latency_p50_ms != null) {
+      uptimeHtml += `<div class="kv-row"><span class="kv-key">Latency</span><span>p50 ${up.latency_p50_ms}ms · p95 ${up.latency_p95_ms}ms</span></div>`;
+    }
   }
   $("detailUptime").innerHTML = uptimeHtml;
-
-  $("detailChecked").textContent = "Last checked: " + r.checked_at;
 }
 
 function openDetail(name) {
@@ -648,6 +759,12 @@ function openEditModal() {
   form.remote_dir.value = c.remote_dir || "";
   form.monthly_token_quota.value = c.monthly_token_quota || 0;
   form.admin_token.value = c.admin_token || "";
+  // These two used to be missing from the form entirely, so ANY edit wiped
+  // them from the saved record (PUT replaces the whole client) — a real
+  // incident on 2026-07-20: refreshing the primary's admin token silently
+  // dropped its admin_local_port, breaking the loopback smoke check.
+  form.admin_local_port.value = c.admin_local_port != null ? c.admin_local_port : "";
+  form.admin_via_ssh.checked = !!c.admin_via_ssh;
   ADVANCED_NUMERIC_FIELDS.forEach((key) => {
     form[key].value = c[key] != null ? c[key] : "";
   });
@@ -666,6 +783,9 @@ async function submitEditForm(e) {
     remote_dir: form.remote_dir.value.trim(),
     monthly_token_quota: parseInt(form.monthly_token_quota.value || "0", 10),
     admin_token: form.admin_token.value.trim(),
+    admin_local_port: form.admin_local_port.value.trim() === ""
+      ? null : parseInt(form.admin_local_port.value, 10),
+    admin_via_ssh: form.admin_via_ssh.checked,
   };
   ADVANCED_NUMERIC_FIELDS.forEach((key) => {
     const raw = form[key].value.trim();
@@ -1181,7 +1301,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 // -- tab navigation ----------------------------------------------------------
 
-const PAGES = ["dashboard", "updates", "onboarding", "credentials", "host"];
+const PAGES = ["dashboard", "updates", "tests", "onboarding", "credentials", "host"];
 
 function switchPage(page) {
   PAGES.forEach((p) => {
@@ -1192,6 +1312,7 @@ function switchPage(page) {
     btn.classList.toggle("active", btn.dataset.page === page);
   });
   if (page === "updates") renderUpdatesPage();
+  if (page === "tests") renderTestsPage();
   if (page === "onboarding") { refreshOnboardings(); populateObTemplateSelect(); }
   if (page === "credentials") { refreshVault(); populateVaultClientSelect(); }
 }
@@ -1641,50 +1762,6 @@ async function vaultApply() {
     : `${data.error || data.detail || "failed"} ${tests}`;
 }
 
-// -- smoke + validate in the client detail modal -----------------------------
-
-let smokeBusy = false;
-
-async function runSmokeFromDetail() {
-  const name = $("detailName").textContent;
-  if (!name || smokeBusy) return;
-  smokeBusy = true;
-  const el = $("smokeResults");
-  el.innerHTML = "running smoke suite (the chat round-trip can take ~30s)…";
-  try {
-    const r = await fetch(`/api/clients/${encodeURIComponent(name)}/smoke`, { method: "POST" });
-    const data = await r.json();
-    el.innerHTML = (data.checks || []).map((c) =>
-      `<div class="smoke-row ${c.ok ? "smoke-ok" : "smoke-fail"}">
-         ${c.ok ? "✔" : "✘"} <strong>${escapeHtml(c.check)}</strong>
-         <span class="muted">${escapeHtml(c.detail)}</span></div>`).join("")
-      || `error: ${escapeHtml(data.detail || "no checks returned")}`;
-  } catch (e) {
-    el.textContent = `smoke request failed: ${e}`;
-  }
-  smokeBusy = false;
-}
-
-async function validateCfgFromDetail() {
-  const name = $("detailName").textContent;
-  if (!name) return;
-  const el = $("smokeResults");
-  el.innerHTML = "validating live site_config.yaml…";
-  try {
-    const r = await fetch(`/api/clients/${encodeURIComponent(name)}/validate-config`, { method: "POST" });
-    const data = await r.json();
-    const rows = [
-      ...(data.errors || []).map((x) => `<div class="smoke-row smoke-fail">✘ ${escapeHtml(x)}</div>`),
-      ...(data.warnings || []).map((x) => `<div class="smoke-row smoke-warn">⚠ ${escapeHtml(x)}</div>`),
-    ];
-    el.innerHTML = data.ok && !rows.length
-      ? `<div class="smoke-row smoke-ok">✔ config valid, no warnings</div>`
-      : (rows.join("") || `error: ${escapeHtml(data.detail || "no result")}`);
-  } catch (e) {
-    el.textContent = `validate request failed: ${e}`;
-  }
-}
-
 // -- wiring ------------------------------------------------------------------
 
 document.addEventListener("DOMContentLoaded", () => {
@@ -1715,8 +1792,16 @@ document.addEventListener("DOMContentLoaded", () => {
   $("vaultForm").addEventListener("submit", submitVaultForm);
   $("vaultImportBtn").addEventListener("click", vaultImport);
   $("vaultApplyBtn").addEventListener("click", vaultApply);
-  $("smokeRunBtn").addEventListener("click", runSmokeFromDetail);
-  $("validateCfgBtn").addEventListener("click", validateCfgFromDetail);
+  // "Run tests…" in the detail modal: jump to the Tests tab with this
+  // client preselected — running is one deliberate click away, since the
+  // chat round-trip costs real LLM tokens.
+  $("detailTestsBtn").addEventListener("click", () => {
+    const name = $("detailModal").dataset.name;
+    if (!name) return;
+    hide("detailModal");
+    testSelected = new Set([name]);
+    switchPage("tests");
+  });
   renderVaultFields();
 });
 
@@ -1998,4 +2083,325 @@ document.addEventListener("DOMContentLoaded", () => {
     hide("updConsole");
     renderUpdatesPage();
   });
+});
+
+// ===========================================================================
+// Tests tab — the fleet test runner, same shape as the Updates tab: every
+// client in one table, select some or all, one click, a live per-client
+// status column + console. Each client runs the full check suite (the
+// 8-check smoke suite + live site_config.yaml validation) via
+// POST /api/test-batch (NDJSON stream; parallel across hosts, sequential
+// per host). Replaces the old, easy-to-miss "Run smoke suite"/"Validate
+// live config" buttons that were buried at the bottom of the detail modal.
+// ===========================================================================
+
+let testSelected = new Set();  // client names checked in the Tests table
+let testRunState = {};         // name -> {state, summary, checks, config, error}
+let testRunning = false;
+
+function testResultCell(name) {
+  const s = testRunState[name];
+  if (!s) return `<span class="muted">not run yet</span>`;
+  if (s.state === "queued") return `<span class="muted">queued…</span>`;
+  if (s.state === "running") return `<span class="upd-running">⟳ running checks…</span>`;
+
+  const sum = s.summary || {};
+  const checks = s.checks || [];
+  const cfg = s.config || {};
+  let headline;
+  if (s.state === "ok") {
+    headline = `<span class="smoke-ok">✔ ${sum.passed ?? "?"}/${sum.total ?? "?"} checks passed</span>`;
+    if ((sum.warnings || []).length) {
+      headline += ` <span class="smoke-warn">⚠ ${sum.warnings.length} warning(s)</span>`;
+    }
+  } else {
+    const failed = (sum.failed_checks || []).join(", ");
+    headline = `<span class="smoke-fail">✘ failed${failed ? ` — ${escapeHtml(failed)}` : ""}</span>`;
+    if ((sum.config_errors || []).length) {
+      headline += ` <span class="smoke-fail">+ ${sum.config_errors.length} config error(s)</span>`;
+    }
+  }
+  if (!checks.length && s.error) {
+    return `${headline}<div class="muted">${escapeHtml(s.error)}</div>`;
+  }
+  const checkRows = checks.map((c) =>
+    `<div class="smoke-row ${c.ok ? "smoke-ok" : (c.check === "backup_timer" ? "smoke-warn" : "smoke-fail")}">
+       ${c.ok ? "✔" : (c.check === "backup_timer" ? "⚠" : "✘")} <strong>${escapeHtml(c.check)}</strong>
+       <span class="muted">${escapeHtml(c.detail || "")}</span></div>`).join("");
+  const cfgRows = [
+    ...(cfg.errors || []).map((x) => `<div class="smoke-row smoke-fail">✘ config: ${escapeHtml(x)}</div>`),
+    ...(cfg.warnings || []).map((x) => `<div class="smoke-row smoke-warn">⚠ config: ${escapeHtml(x)}</div>`),
+  ].join("") || `<div class="smoke-row smoke-ok">✔ <strong>site_config.yaml</strong> <span class="muted">valid</span></div>`;
+  return `${headline}
+    <details class="upd-commits" data-name="${escapeHtml(name)}">
+      <summary>details</summary>${checkRows}${cfgRows}
+    </details>`;
+}
+
+function renderTestsPage() {
+  const tbody = $("testTableBody");
+  if (!tbody) return;
+
+  const listed = new Set(latestResults.map((r) => r.name));
+  testSelected = new Set([...testSelected].filter((n) => listed.has(n)));
+
+  // Keep expanded per-row details open across the background poll re-render,
+  // same as the Updates table.
+  const openDetails = new Set(
+    [...tbody.querySelectorAll("details[open][data-name]")].map((d) => d.dataset.name));
+
+  if (latestResults.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="5" class="empty">No clients configured yet — nothing to test.</td></tr>`;
+  } else {
+    tbody.innerHTML = latestResults.map((r) => {
+      const checked = testSelected.has(r.name) ? "checked" : "";
+      const h = r.health || {};
+      const healthCell = h.up
+        ? `<span class="ok">●</span> UP <span class="muted">${h.latency_ms}ms</span>`
+        : `<span class="down">●</span> DOWN`;
+      let resultHtml = testResultCell(r.name);
+      if (openDetails.has(r.name)) {
+        resultHtml = resultHtml.replace("<details class=\"upd-commits\"", "<details open class=\"upd-commits\"");
+      }
+      return `<tr>
+        <td><input type="checkbox" class="test-check" data-name="${escapeHtml(r.name)}" ${checked} ${testRunning ? "disabled" : ""} /></td>
+        <td><a href="#" class="test-name" data-name="${escapeHtml(r.name)}">${escapeHtml(r.name)}</a></td>
+        <td>${healthCell}</td>
+        <td class="test-result-cell">${resultHtml}</td>
+        <td><button type="button" class="test-row-btn icon-btn" data-name="${escapeHtml(r.name)}" ${testRunning ? "disabled" : ""}>Test</button></td>
+      </tr>`;
+    }).join("");
+
+    [...tbody.querySelectorAll(".test-check")].forEach((cb) => {
+      cb.addEventListener("change", () => {
+        if (cb.checked) testSelected.add(cb.dataset.name);
+        else testSelected.delete(cb.dataset.name);
+        testSyncToolbar();
+      });
+    });
+    [...tbody.querySelectorAll(".test-row-btn")].forEach((btn) => {
+      btn.addEventListener("click", () => startBatchTests([btn.dataset.name]));
+    });
+    [...tbody.querySelectorAll(".test-name")].forEach((el) => {
+      el.addEventListener("click", (e) => { e.preventDefault(); openDetail(el.dataset.name); });
+    });
+  }
+
+  testSyncToolbar();
+}
+
+function testSyncToolbar() {
+  const btn = $("testRunBtn");
+  if (!btn) return;
+  btn.disabled = testRunning || testSelected.size === 0;
+  btn.textContent = testSelected.size
+    ? `Run tests on selected (${testSelected.size})` : "Run tests on selected";
+  $("testSelectAllBtn").disabled = testRunning;
+  $("testSelectNoneBtn").disabled = testRunning;
+  $("testClearBtn").classList.toggle("hidden", testRunning || !Object.keys(testRunState).length);
+  $("testSummary").textContent = testRunning ? "running — watch the console below" : "";
+}
+
+function testConsoleLine(text) {
+  const el = $("testConsole");
+  el.textContent += text + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+
+function handleTestEvent(ev) {
+  if (ev.type === "start") {
+    testRunState[ev.name] = { state: "running" };
+    testConsoleLine(`▶ ${ev.name}: running checks (health, TLS, admin API, chat round-trip, config)…`);
+  } else if (ev.type === "result") {
+    const sum = ev.summary || {};
+    if (ev.ok) {
+      testRunState[ev.name] = { state: "ok", summary: sum, checks: ev.checks, config: ev.config };
+      const warn = (sum.warnings || []).length ? ` (⚠ ${sum.warnings.join("; ")})` : "";
+      testConsoleLine(`✔ ${ev.name}: ${sum.passed}/${sum.total} checks passed, config valid${warn}`);
+    } else {
+      testRunState[ev.name] = { state: "fail", summary: sum, checks: ev.checks, config: ev.config, error: ev.error };
+      testConsoleLine(`✘ ${ev.name}: ${ev.error || "checks failed"}`);
+      (ev.checks || []).filter((c) => !c.ok && c.check !== "backup_timer").forEach((c) => {
+        testConsoleLine(`    ✘ ${c.check}: ${c.detail || ""}`);
+      });
+      ((ev.config || {}).errors || []).forEach((x) => testConsoleLine(`    ✘ config: ${x}`));
+    }
+  } else if (ev.type === "done") {
+    testConsoleLine(`— done: ${ev.ok_count} ok, ${ev.fail_count} failed —`);
+    if (ev.error) testConsoleLine(`✘ ${ev.error}`);
+  }
+  renderTestsPage();
+}
+
+async function startBatchTests(names) {
+  if (testRunning || !names.length) return;
+  testRunning = true;
+  testRunState = {};
+  names.forEach((n) => { testRunState[n] = { state: "queued" }; });
+  const consoleEl = $("testConsole");
+  consoleEl.textContent = "";
+  show("testConsole");
+  testConsoleLine(`— testing ${names.length} client(s): ${names.join(", ")} —`);
+  renderTestsPage();
+  try {
+    const resp = await fetch("/api/test-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `server answered ${resp.status}`);
+    }
+    if (!resp.body) throw new Error("this browser doesn't support streaming responses");
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        handleTestEvent(ev);
+      }
+    }
+  } catch (e) {
+    testConsoleLine(`✘ test request failed: ${e.message || e}`);
+    Object.keys(testRunState).forEach((n) => {
+      const s = testRunState[n];
+      if (s.state === "queued" || s.state === "running") {
+        testRunState[n] = { state: "fail", error: String(e.message || e), summary: {} };
+      }
+    });
+  }
+  testRunning = false;
+  renderTestsPage();
+}
+
+// -- backups setup (same page, same selection) -------------------------------
+
+let bkRunning = false;
+
+function bkConsoleLine(text) {
+  const el = $("bkConsole");
+  el.textContent += text + "\n";
+  el.scrollTop = el.scrollHeight;
+}
+
+function showBkConfirm(names) {
+  if (bkRunning) return;
+  if (!names.length) {
+    $("bkSummary").textContent = "select clients in the table above first";
+    return;
+  }
+  const area = $("bkConfirmArea");
+  const phrase = `backups ${names.length}`;
+  area.innerHTML = `
+    <div class="deploy-confirm">
+      <p class="muted">About to install/repair the nightly backup timer on
+        <strong>${names.length}</strong> client(s): <strong>${names.map(escapeHtml).join(", ")}</strong> —
+        then run a real backup on each right now and verify the encrypted archive appears.
+        Idempotent; an already-configured client just gets re-verified.</p>
+      <label>Type "<strong>${phrase}</strong>" to confirm:
+        <input id="bkConfirmInput" type="text" autocomplete="off" spellcheck="false" />
+      </label>
+      <div class="modal-actions">
+        <button id="bkConfirmGoBtn" type="button" class="danger" disabled>Set up backups on ${names.length} client(s)</button>
+        <button id="bkConfirmCancelBtn" type="button">Cancel</button>
+      </div>
+    </div>`;
+  show("bkConfirmArea");
+  const input = $("bkConfirmInput");
+  const goBtn = $("bkConfirmGoBtn");
+  input.addEventListener("input", () => {
+    goBtn.disabled = input.value.trim().toLowerCase() !== phrase;
+  });
+  input.focus();
+  goBtn.addEventListener("click", () => startBackupSetup(names));
+  $("bkConfirmCancelBtn").addEventListener("click", () => hide("bkConfirmArea"));
+}
+
+async function startBackupSetup(names) {
+  if (bkRunning || !names.length) return;
+  bkRunning = true;
+  hide("bkConfirmArea");
+  $("bkSetupBtn").disabled = true;
+  $("bkSummary").textContent = "running — each client takes a real backup, give it a minute";
+  const consoleEl = $("bkConsole");
+  consoleEl.textContent = "";
+  show("bkConsole");
+  bkConsoleLine(`— setting up backups on ${names.length} client(s): ${names.join(", ")} —`);
+  try {
+    const resp = await fetch("/api/backup-batch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ names, confirm: `backups ${names.length}` }),
+    });
+    if (!resp.ok) {
+      const err = await resp.json().catch(() => ({}));
+      throw new Error(err.detail || `server answered ${resp.status}`);
+    }
+    if (!resp.body) throw new Error("this browser doesn't support streaming responses");
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n");
+      buffer = lines.pop();
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        let ev;
+        try { ev = JSON.parse(line); } catch { continue; }
+        if (ev.type === "start") {
+          bkConsoleLine(`▶ ${ev.name}: installing timer + running a test backup…`);
+        } else if (ev.type === "result") {
+          if (ev.ok) {
+            const archiveNote = ev.newest ? ` — newest: ${ev.newest.split("/").pop()}` : "";
+            bkConsoleLine(`✔ ${ev.name}: nightly backups ACTIVE, fresh archive verified `
+              + `(${ev.archives} on disk${archiveNote})`);
+            if (ev.error) bkConsoleLine(`    note: ${ev.error}`);
+          } else {
+            bkConsoleLine(`✘ ${ev.name}: failed at the ${ev.stage || "?"} stage — ${ev.error || "no error text"}`);
+            const tail = (ev.output || "").split("\n").slice(-12).map((l) => "    " + l).join("\n");
+            if (tail.trim()) bkConsoleLine(tail);
+          }
+        } else if (ev.type === "done") {
+          bkConsoleLine(`— done: ${ev.ok_count} ok, ${ev.fail_count} failed —`);
+          if (ev.error) bkConsoleLine(`✘ ${ev.error}`);
+        }
+      }
+    }
+  } catch (e) {
+    bkConsoleLine(`✘ backup-setup request failed: ${e.message || e}`);
+  }
+  bkRunning = false;
+  $("bkSetupBtn").disabled = false;
+  $("bkSummary").textContent = "";
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  $("testSelectAllBtn").addEventListener("click", () => {
+    latestResults.forEach((r) => testSelected.add(r.name));
+    renderTestsPage();
+  });
+  $("testSelectNoneBtn").addEventListener("click", () => {
+    testSelected.clear();
+    renderTestsPage();
+  });
+  $("testRunBtn").addEventListener("click", () => startBatchTests([...testSelected]));
+  $("testClearBtn").addEventListener("click", () => {
+    if (testRunning) return;
+    testRunState = {};
+    hide("testConsole");
+    renderTestsPage();
+  });
+  $("bkSetupBtn").addEventListener("click", () => showBkConfirm([...testSelected]));
 });

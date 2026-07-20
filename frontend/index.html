@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <title>ops-console</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="/static/style.css?v=obv2-9" />
+  <link rel="stylesheet" href="/static/style.css?v=obv2-13" />
 </head>
 <body>
   <header>
@@ -18,6 +18,7 @@
     <nav id="mainTabs" class="main-tabs">
       <button class="tab active" data-page="dashboard">Dashboard</button>
       <button class="tab" data-page="updates">Updates <span id="updTabBadge" class="upd-tab-badge hidden"></span></button>
+      <button class="tab" data-page="tests">Tests</button>
       <button class="tab" data-page="onboarding">Onboarding</button>
       <button class="tab" data-page="credentials">Credentials</button>
       <button class="tab" data-page="host">Host / VPS</button>
@@ -102,6 +103,53 @@
         <pre id="updConsole" class="newclient-console hidden"></pre>
       </section>
     </div><!-- /page-updates -->
+
+    <div id="page-tests" class="page hidden">
+      <section class="ob-panel">
+        <h3>Fleet tests</h3>
+        <p class="muted">Run the full check suite against any set of clients in one go — the 9-check smoke
+        suite (loopback + public health, <strong>.env sanity</strong> — structure, no default admin
+        password, backup passphrase present; values never leave the box — TLS certificate, /config sanity,
+        admin API, embed CSP, a <strong>real chat round-trip</strong> that proves the LLM key end to end,
+        backup timer) plus live <code>site_config.yaml</code> validation. All checks are read-only; the
+        chat round-trip burns a few LLM tokens per client — that's the cost of actually proving it's
+        alive. Parallel across VPSes, one client at a time per VPS; the chat check alone can take ~30s
+        per client.</p>
+        <div class="upd-toolbar">
+          <button id="testSelectAllBtn">Select all</button>
+          <button id="testSelectNoneBtn">Deselect all</button>
+          <button id="testRunBtn" class="primary">Run tests on selected</button>
+          <button id="testClearBtn" class="hidden">Clear results</button>
+          <span id="testSummary" class="muted"></span>
+        </div>
+        <table id="testTable">
+          <thead>
+            <tr><th></th><th>Client</th><th>Health</th><th>Result</th><th></th></tr>
+          </thead>
+          <tbody id="testTableBody">
+            <tr><td colspan="5" class="empty">Checking…</td></tr>
+          </tbody>
+        </table>
+        <pre id="testConsole" class="newclient-console hidden"></pre>
+      </section>
+
+      <section class="ob-panel">
+        <h3>Backups</h3>
+        <p class="muted">Installs (or repairs) the <strong>nightly encrypted-backup timer</strong> on each
+        selected client's VPS — correctly-named units pointing at that client's real checkout — then
+        <strong>proves it</strong> by running a real backup immediately and checking a fresh encrypted
+        archive appears on disk (a timer that fires isn't a backup; only the archive is). Uses the same
+        selection as the table above. Idempotent — safe to re-run any time; needs a
+        <code>BACKUP_PASSPHRASE</code> in the instance's <code>.env</code> (the wizard always generates
+        one; otherwise set it via Credentials first).</p>
+        <div class="upd-toolbar">
+          <button id="bkSetupBtn" class="primary">Set up backups on selected</button>
+          <span id="bkSummary" class="muted"></span>
+        </div>
+        <div id="bkConfirmArea" class="hidden"></div>
+        <pre id="bkConsole" class="newclient-console hidden"></pre>
+      </section>
+    </div><!-- /page-tests -->
 
     <div id="page-onboarding" class="page hidden">
       <section class="ob-panel">
@@ -195,63 +243,60 @@
 
   <!-- Detail modal -->
   <div id="detailModal" class="modal hidden">
-    <div class="modal-box">
+    <div class="modal-box wide detail-box">
       <button class="close" data-close="detailModal">&times;</button>
-      <h2 id="detailName"></h2>
-      <div id="detailStatus" class="status-pill"></div>
 
-      <section>
-        <h3>Health</h3>
-        <div id="detailHealth"></div>
-      </section>
-
-      <section>
-        <h3>Version / containers</h3>
-        <div id="detailVersion"></div>
-        <div id="deployArea" class="deploy-area"></div>
-      </section>
-
-      <section>
-        <h3>Usage this month</h3>
-        <div id="detailUsage"></div>
-        <div class="progress-track"><div id="detailQuotaBar" class="progress-fill"></div></div>
-      </section>
-
-      <section>
-        <h3>Resources</h3>
-        <div id="detailResources"></div>
-      </section>
-
-      <section>
-        <h3>Interactions this month</h3>
-        <div id="detailInteractions"></div>
-      </section>
-
-      <section>
-        <h3>Estimated cost</h3>
-        <div id="detailCost"></div>
-      </section>
-
-      <section>
-        <h3>Uptime &amp; latency (from ops-console's own history)</h3>
-        <div id="detailUptime"></div>
-      </section>
-
-      <section>
-        <h3>Checks</h3>
-        <div class="modal-actions">
-          <button type="button" id="smokeRunBtn">Run smoke suite</button>
-          <button type="button" id="validateCfgBtn">Validate live config</button>
+      <div class="detail-head">
+        <div class="detail-head-id">
+          <h2 id="detailName"></h2>
+          <a id="detailUrl" class="detail-url" target="_blank" rel="noopener"></a>
         </div>
-        <div id="smokeResults" class="muted"></div>
-      </section>
+        <div class="detail-head-status">
+          <div id="detailStatus" class="status-pill"></div>
+          <p id="detailChecked" class="muted"></p>
+        </div>
+      </div>
 
-      <div class="modal-actions">
+      <div id="detailAlert"></div>
+
+      <div id="detailGlance" class="detail-glance"></div>
+
+      <div class="detail-cols">
+        <section class="detail-card detail-card-wide">
+          <h3>Version &amp; deploy</h3>
+          <div id="detailVersion"></div>
+          <div id="deployArea" class="deploy-area"></div>
+        </section>
+
+        <section class="detail-card">
+          <h3>Usage &amp; cost this month</h3>
+          <div id="detailUsage"></div>
+          <div class="progress-track"><div id="detailQuotaBar" class="progress-fill"></div></div>
+        </section>
+
+        <section class="detail-card">
+          <h3>Interactions this month</h3>
+          <div id="detailInteractions"></div>
+        </section>
+
+        <section class="detail-card">
+          <h3>Resources</h3>
+          <div id="detailResources"></div>
+        </section>
+
+        <section class="detail-card">
+          <h3>Uptime &amp; latency <span class="muted">(ops-console's own history)</span></h3>
+          <div id="detailUptime"></div>
+        </section>
+      </div>
+
+      <div class="modal-actions detail-actions">
         <button id="detailRefreshBtn">Refresh now</button>
+        <button id="detailTestsBtn">Run tests…</button>
+        <span class="detail-actions-spacer"></span>
         <button id="detailEditBtn">Edit</button>
         <button id="detailDeleteBtn" class="danger">Remove</button>
       </div>
-      <p id="detailChecked" class="muted"></p>
     </div>
   </div>
 
@@ -273,6 +318,12 @@
           </span>
         </label>
         <p id="fetchTokenStatus" class="muted"></p>
+        <label>Admin loopback port <span class="muted">(the instance's 127.0.0.1 port on its VPS — used by the smoke suite and SSH-based metrics)</span>
+          <input name="admin_local_port" type="number" min="1" max="65535" placeholder="8000" />
+        </label>
+        <label class="creds-restart-label"><input type="checkbox" name="admin_via_ssh" />
+          Fetch admin metrics via SSH loopback <span class="muted">(required for ADMIN_TUNNEL_ONLY instances)</span>
+        </label>
 
         <details class="advanced-fields">
           <summary>Advanced: "minutes saved" &amp; cost-estimate rates (optional)</summary>
@@ -390,6 +441,6 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=obv2-9"></script>
+  <script src="/static/app.js?v=obv2-13"></script>
 </body>
 </html>

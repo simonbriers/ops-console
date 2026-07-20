@@ -391,6 +391,73 @@ The stream speaks the same NDJSON dialect as `/new-client/stream`:
 commit, error, output}` per client → one final `{"type": "done",
 "ok_count", "fail_count"}`.
 
+## Fleet tests — the Tests tab
+
+Same shape as the Updates tab, for checking instead of deploying: every
+client in one table, select some or all, one click, a live per-client
+status column + streaming console. Each selected client runs the full
+check suite — the 9-check smoke suite (loopback + public health, `.env`
+sanity, TLS certificate near-expiry, `/config` sanity, admin API with the
+stored token, embed CSP, a **real chat round-trip** that proves the LLM
+key end to end, backup timer) plus live `site_config.yaml` validation, with
+expandable per-check results right in the table. This replaces the old
+"Run smoke suite" / "Validate live config" buttons that were buried at
+the bottom of the client detail modal (the modal's "Run tests…" button
+now jumps here with that client preselected).
+
+Verdict mirrors the single smoke endpoint's bar: every check except
+`backup_timer` must pass AND the config must have no validation errors;
+backup-timer failures and config warnings are reported as warnings, never
+as failure. No typed confirmation — everything is read-only against the
+monitored instances (the chat round-trip does burn a few LLM tokens per
+client, the cost of actually proving the key works). `POST
+/api/test-batch` streams the same NDJSON dialect as `/deploy-batch`, and
+both now run through one generic `core.batch_stream(clients, job)` —
+parallel across hosts, strictly sequential per host.
+
+The `env_file` check (added 2026-07-20, same incident chain as the backups
+work below) audits each instance's `.env` **structurally, over SSH, without
+any secret value ever appearing in a result**: every line must be
+`KEY=value` (a wrapped value is how the primary's backups broke), multi-key
+vars (`NVIDIA_API_KEY`, `MISTRAL_API_KEY`, …) must not have a space after
+the comma (keys stay comma-separated — rotation is unaffected), a
+`BACKUP_PASSPHRASE` must exist, and `ADMIN_PASSWORD` must not be the
+default — that one is checked unconditionally because `ENV=dev` (a
+deliberate tradeoff on voice-enabled non-medical instances) silently
+disables the product's own boot guard that would otherwise refuse the
+default password. `ENV != prod` itself is reported as a note, not a
+failure. `DOMAIN`'s comma+space is deliberately NOT flagged (Caddy
+address-list syntax).
+
+### Backups panel (same page)
+
+Below the tests table: **Set up backups on selected** installs (or repairs)
+the nightly encrypted-backup systemd timer on each selected client's VPS —
+unit files named `<checkout-dir>-backup.*` with paths derived from that
+client's real `remote_dir` (the naming the smoke suite's `backup_timer`
+check expects) — then **proves it** by running a real backup immediately
+via `systemctl start` and verifying the archive count in
+`{remote_dir}/backups` grew. Born from a real incident (2026-07-20): the
+primary's timer had fired nightly for 17 days producing nothing (unit
+pointed at a nonexistent `/opt` path → `status=203/EXEC`, no journal
+output), which is why "timer active" alone is never trusted — only a fresh
+archive is. Stages gate each other (passphrase present → passwordless sudo
+→ script present → install/enable → test run → verify), each failure comes
+back with an actionable per-client error, and everything is idempotent.
+Typed confirmation `backups <N>`, checked server-side (`POST
+/api/backup-batch`, same NDJSON dialect); every result lands in
+`deploy_log.jsonl` as action `"backup-setup"`. Requires the SSH user to
+have passwordless sudo (the product's `setup-server.sh` grants it).
+
+The client detail modal itself was rebuilt in the same pass: a wide
+two-column card layout with an at-a-glance KPI strip (health, version,
+uptime, tokens/quota, chats/time-saved, est. cost), alert banners for
+down/over-quota/infra-risk, and the deploy area in its own card — in
+place of the old single narrow scrolling column. The same pass fixed a
+long-standing CSS gap: there was no generic `.hidden` rule (only
+`.modal.hidden`/`.page.hidden`), so several "hidden" elements — the
+onboarding console among them — were actually always visible.
+
 ## Running in Docker vs. venv: two separate config stores, and a real SSH limit
 
 The venv path (`clients.json` next to the project root) and the Docker path

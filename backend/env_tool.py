@@ -72,6 +72,24 @@ def read_remote_env(ssh_target: str, remote_dir: str) -> dict[str, Any]:
     return {"ok": True, "error": None, "env": parse_env(output), "exists": True}
 
 
+def _format_env_value(value: str) -> str:
+    """Re-quotes a value for writing when it needs it. parse_env STRIPS
+    surrounding quotes on read, so writing values back raw silently
+    unquoted them — which is exactly how a Gmail app password with spaces
+    (quoted on the source instance) landed unquoted on a destination and
+    broke everything that reads .env as shell (Acme's backups,
+    2026-07-20). Values containing whitespace or '#' get double quotes
+    (docker compose strips them back off); a value that ALSO contains a
+    double quote gets single quotes instead; everything else is written
+    as-is."""
+    if re.search(r"[\s#]", value or ""):
+        if '"' not in value:
+            return f'"{value}"'
+        if "'" not in value:
+            return f"'{value}'"
+    return value
+
+
 def write_remote_env(ssh_target: str, remote_dir: str, env: dict[str, str]) -> dict[str, Any]:
     """Writes the given key/value pairs as {remote_dir}/.env, replacing
     whatever was there wholesale — the UI always seeds its table from the
@@ -95,7 +113,7 @@ def write_remote_env(ssh_target: str, remote_dir: str, env: dict[str, str]) -> d
     if not ssh_target or not remote_dir:
         return {"ok": False, "error": "no ssh_target/remote_dir configured"}
     shell_dir = _shell_remote_dir(remote_dir.rstrip("/"))
-    lines = [f"{key}={value}" for key, value in env.items()]
+    lines = [f"{key}={_format_env_value(value)}" for key, value in env.items()]
     content = "\n".join(lines) + ("\n" if lines else "")
     b64 = base64.b64encode(content.encode("utf-8")).decode("ascii")
     cmd = (
