@@ -198,13 +198,36 @@
     <div id="page-credentials" class="page hidden">
       <section class="ob-panel">
         <h3>Credential vault</h3>
-        <p class="muted">Store each credential ONCE, assign it to any client. Rotating a key =
-        edit it here, then re-apply to the clients that use it. Values are stored in this
-        console's own data volume (same trust level as the admin tokens in clients.json).</p>
+        <p class="muted">Store each credential ONCE, assign it to any client — grouped by
+        <strong>role</strong> (LLM / STT / TTS / e-mail / SMS), provider is an attribute.
+        Rotating a key = edit it here; the console then offers to re-apply it to every client
+        that runs on it. Values are stored in this console's own data volume (same trust level
+        as the admin tokens in clients.json) — Reveal shows them; it's our own trust boundary.</p>
         <table id="vaultTable">
-          <thead><tr><th>Name</th><th>Kind</th><th>Keys</th><th>Updated</th><th></th></tr></thead>
-          <tbody id="vaultTableBody"><tr><td colspan="5" class="empty">No sets yet — add one below or import from a client.</td></tr></tbody>
+          <thead><tr><th></th><th>Set</th><th>Provider</th><th>Source</th><th>Keys / alias</th>
+            <th>Assigned to</th><th>Updated</th><th></th></tr></thead>
+          <tbody id="vaultTableBody"><tr><td colspan="8" class="empty">No sets yet — add one below or import from a client.</td></tr></tbody>
         </table>
+      </section>
+
+      <section class="ob-panel">
+        <h3>Who runs on what</h3>
+        <p class="muted">Live assignment per client and role. <em>Reconcile</em> reads each
+        client's remote <code>.env</code> (read-only) and matches it against the vault —
+        backfills this table for clients set up before assignments existed, and flags
+        <span class="vault-drift">drift</span>: live keys the vault doesn't know.</p>
+        <div class="ob-form">
+          <button type="button" id="vaultReconcileBtn">Reconcile from servers</button>
+          <span id="vaultReconcileStatus" class="muted"></span>
+        </div>
+        <table id="vaultMatrix">
+          <thead><tr><th>Client</th><th>LLM</th><th>STT</th><th>TTS</th><th>E-mail</th><th>SMS</th><th></th></tr></thead>
+          <tbody id="vaultMatrixBody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
+        </table>
+        <p class="muted">Change a dropdown and press that row's <strong>Apply</strong> — merges into
+        the client's <code>.env</code> (backed up server-side), tests the credential, and
+        <strong>recreates the container</strong>. Disruptive by nature: don't swap on the frozen
+        instances (chat.*, primeconnectai.*) until the overhaul cutover — use acme.</p>
       </section>
 
       <section class="ob-panel">
@@ -214,28 +237,46 @@
           <label>Name <input name="name" placeholder="Mistral main key" required /></label>
           <label>Kind
             <select name="kind" id="vaultKindSelect">
-              <option value="mistral">mistral (LLM key)</option>
-              <option value="smtp">smtp (mail)</option>
-              <option value="twilio">twilio (SMS)</option>
-              <option value="file/google_tts">google_tts.json (file)</option>
+              <option value="mistral">LLM — mistral (MISTRAL_API_KEY)</option>
+              <option value="openrouter">LLM — openrouter (OPENROUTER_API_KEY)</option>
+              <option value="nvidia">LLM — nvidia (NVIDIA_API_KEY)</option>
+              <option value="smtp">E-mail — smtp</option>
+              <option value="twilio">SMS — twilio</option>
+              <option value="file/google_tts">TTS — google_tts.json (file)</option>
+            </select>
+          </label>
+          <label>Owner
+            <select name="owner" id="vaultOwnerSelect">
+              <option value="ours">ours</option>
+              <option value="client">client (BYOK)</option>
+            </select>
+          </label>
+          <label>Tier
+            <select name="tier" id="vaultTierSelect">
+              <option value="paid">paid</option>
+              <option value="free">free</option>
+              <option value="local">local</option>
             </select>
           </label>
           <div id="vaultFields"></div>
+          <label>Notes <input name="notes" placeholder="caps, reset day, where it came from…" /></label>
           <button type="submit" class="primary">Save set</button>
+          <button type="button" id="vaultFormResetBtn">Clear form</button>
           <span id="vaultFormStatus" class="muted"></span>
         </form>
       </section>
 
       <section class="ob-panel">
-        <h3>Apply to a client / import</h3>
+        <h3>Bulk apply / import</h3>
         <div class="ob-form">
           <label>Client <select id="vaultClientSelect"></select></label>
           <button type="button" id="vaultImportBtn">Import this client's .env into the vault</button>
           <button type="button" id="vaultApplyBtn" class="primary">Apply checked sets to this client</button>
           <span id="vaultApplyStatus" class="muted"></span>
         </div>
-        <p class="muted">Applying merges the sets into the client's <code>.env</code> (backed up
-        server-side), tests each credential, and recreates the container so values take effect.</p>
+        <p class="muted">Applying merges the checked sets into the client's <code>.env</code>
+        (backed up server-side), tests each credential, and recreates the container so values
+        take effect. Import also records assignments — what it read IS what that client runs on.</p>
         <button type="button" id="openLegacyCredsBtn">Open the legacy .env copy tool…</button>
       </section>
     </div><!-- /page-credentials -->
@@ -441,6 +482,12 @@
     </div>
   </div>
 
-  <script src="/static/app.js?v=obv2-13"></script>
+  <script src="/static/app.js?v=obv2-14"></script>
+  <!-- Credentials tab (vault v2). Split out of app.js per
+       docs/TOKEN_ECONOMY_PLAN.md ("the app.js split starts here").
+       Loads AFTER app.js: reuses its $/show/hide/escapeHtml globals and
+       provides refreshVault()/populateVaultClientSelect() that
+       switchPage() calls. -->
+  <script src="/static/credentials.js?v=vault2-7"></script>
 </body>
 </html>

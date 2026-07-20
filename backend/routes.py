@@ -624,10 +624,25 @@ class VaultSetIn(BaseModel):
     values: dict[str, str] = {}
     content_b64: str | None = None
     id: str | None = None
+    # Phase 1 (docs/TOKEN_ECONOMY_PLAN.md): sourcing metadata. None = leave
+    # unchanged on edit / use defaults on create (ours/paid).
+    owner: str | None = None    # "ours" | "client" (BYOK)
+    tier: str | None = None     # "paid" | "free" | "local"
+    notes: str | None = None
 
 
 class VaultImportIn(BaseModel):
     client_name: str
+
+
+class VaultReconcileIn(BaseModel):
+    client_name: str | None = None   # None = reconcile every client
+
+
+class VaultAssignIn(BaseModel):
+    client_name: str
+    role: str
+    set_id: str
 
 
 class ApplyCredsIn(BaseModel):
@@ -1153,10 +1168,58 @@ def vault_list() -> list[dict[str, Any]]:
 
 @router.post("/vault/sets")
 def vault_upsert(body: VaultSetIn) -> dict[str, Any]:
-    res = vault_mod.upsert_set(body.name, body.kind, body.values, body.content_b64, body.id)
+    res = vault_mod.upsert_set(body.name, body.kind, body.values, body.content_b64, body.id,
+                               owner=body.owner, tier=body.tier, notes=body.notes)
     if not res["ok"]:
         raise HTTPException(status_code=400, detail=res["error"])
     return res
+
+
+@router.post("/vault/sets/{set_id}/reveal")
+def vault_reveal(set_id: str) -> dict[str, Any]:
+    """Unredacted values for one set. POST (not GET) so secrets never sit
+    in a URL/access-log line. Same local trust boundary as /fetch-token."""
+    res = vault_mod.reveal_set(set_id)
+    if not res["ok"]:
+        raise HTTPException(status_code=404, detail=res["error"])
+    return res
+
+
+@router.get("/vault/assignments")
+def vault_assignments() -> list[dict[str, Any]]:
+    return vault_mod.list_assignments()
+
+
+@router.post("/vault/assignments")
+def vault_assign_manual(body: VaultAssignIn) -> dict[str, Any]:
+    """Record-only assignment: document that a client already runs on a
+    set WITHOUT touching the server (no .env write, no recreate). Exists
+    for file credentials (invisible to reconcile) and for frozen clients
+    where an apply's container recreate is off-limits."""
+    if cfg.find_client(body.client_name) is None:
+        raise HTTPException(status_code=404, detail=f"No client named {body.client_name!r}")
+    if body.role not in vault_mod.ROLES:
+        raise HTTPException(status_code=400, detail=f"role must be one of {vault_mod.ROLES}")
+    if not any(s["id"] == body.set_id for s in vault_mod.load_vault()["sets"]):
+        raise HTTPException(status_code=404, detail=f"no set with id {body.set_id!r}")
+    vault_mod.record_assignment(body.client_name, body.role, body.set_id, "manual")
+    return {"ok": True, "error": None}
+
+
+@router.post("/vault/reconcile")
+def vault_reconcile(body: VaultReconcileIn) -> dict[str, Any]:
+    """Backfill/refresh assignments from each client's live remote .env.
+    Read-only toward the instances (a cat over SSH) — safe for frozen
+    clients too."""
+    if body.client_name:
+        client = cfg.find_client(body.client_name)
+        if client is None:
+            raise HTTPException(status_code=404, detail=f"No client named {body.client_name!r}")
+        clients = [client]
+    else:
+        clients = cfg.load_clients()
+    reports = [vault_mod.reconcile_client(c) for c in clients]
+    return {"ok": all(r.get("ok") for r in reports) if reports else True, "reports": reports}
 
 
 @router.delete("/vault/sets/{set_id}", status_code=204)

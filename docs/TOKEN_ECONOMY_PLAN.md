@@ -406,13 +406,42 @@ projected empty date, statement-to-date.
   clobber each other; after Phase 6 they no longer share any fields at
   all.
 
-### Phase 8 — meter the remaining roles (product-side)
+### Phase 8 — meter the remaining roles (product-side + provider-side)
 
 Voice minutes (session durations already exist in voice sessions),
 TTS characters/minutes, SMS sends and emails (countable from the audit
 ledger, which already records them). Each lands in the same snapshot →
 ledger → gauge chain; the clinic-visible % silently starts covering
 them (D1: native units under one € allowance).
+
+TTS concretely (2026-07-20 findings — the fleet actually runs a mixed
+TTS estate: google Neural2 on the demo + PrimeConnect, piper local on
+Valor + acme; providers available in the product: google / mistral
+Voxtral / piper / nvidia, see dental `backend/voice/`):
+
+- **Two metering paths, use both.** (a) *Product-side counters* — count
+  characters handed to the TTS service per session in
+  `voice/pipeline.py`; works identically for every provider, lands in
+  the same admin-API metrics the LLM tokens already use. (b)
+  *Provider-side pull* — for google, the console holds the same
+  service-account JSON the instances use, so the ledger can query
+  Google's own Cloud Monitoring/billing numbers for the TTS SKUs and
+  RECONCILE our counters against Google's meter (the same
+  trust-but-verify pattern as prepaid-source balances). Product-side is
+  the source of per-client attribution; provider-side is the source of
+  billing truth.
+- **The google tank is a real free-tier tank**: Neural2 ≈ 1M chars/month
+  free, ~$16/1M after; resets on Google's billing calendar, not ours.
+  Capacity + reset day live on the credential (tier=free with caps, per
+  Phase 1); the visual shows it draining like any prepaid source. SKU
+  awareness matters: a Studio voice id has a ~100k free tier and ~$160/
+  1M — a voice-id choice is a 10× cost decision, so the ledger should
+  record the voice id (SKU) per client, not just "google".
+- **piper = €0 local source** (no metering needed beyond optional
+  session counts); **mistral Voxtral TTS** meters on the same mistral
+  key/alias as LLM+STT — one credential, three metered roles, which the
+  ledger must attribute per role (the product-side counter provides the
+  split; the provider's own usage view only shows the total).
 
 ### Deferred / explicitly not now
 

@@ -1656,111 +1656,10 @@ async function teardownCurrent() {
 }
 
 // -- credentials vault -------------------------------------------------------
-
-const VAULT_FIELDS = {
-  "mistral": ["MISTRAL_API_KEY"],
-  "smtp": ["SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_USE_TLS"],
-  "twilio": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"],
-  "file/google_tts": [],
-};
-
-function renderVaultFields() {
-  const kind = $("vaultKindSelect").value;
-  const el = $("vaultFields");
-  if (kind === "file/google_tts") {
-    el.innerHTML = `<label>google_tts.json file <input type="file" id="vaultFileInput" accept=".json" /></label>`;
-    return;
-  }
-  el.innerHTML = (VAULT_FIELDS[kind] || []).map((k) =>
-    `<label>${escapeHtml(k)} <input name="v_${escapeHtml(k)}"
-       type="${/PASSWORD|KEY|TOKEN/.test(k) ? "password" : "text"}" /></label>`).join("");
-}
-
-async function refreshVault() {
-  const r = await fetch("/api/vault/sets");
-  const sets = await r.json();
-  const body = $("vaultTableBody");
-  if (!sets.length) {
-    body.innerHTML = `<tr><td colspan="5" class="empty">No sets yet — add one below or import from a client.</td></tr>`;
-    return;
-  }
-  body.innerHTML = sets.map((s) => `<tr>
-    <td><label><input type="checkbox" class="vault-pick" value="${escapeHtml(s.id)}" /> ${escapeHtml(s.name)}</label></td>
-    <td>${escapeHtml(s.kind)}</td>
-    <td class="muted">${s.has_file ? "(file)" : escapeHtml(Object.keys(s.values || {}).join(", "))}</td>
-    <td class="muted">${escapeHtml(s.updated || "")}</td>
-    <td><button type="button" class="danger vault-del" data-id="${escapeHtml(s.id)}">Delete</button></td>
-  </tr>`).join("");
-  body.querySelectorAll(".vault-del").forEach((btn) => {
-    btn.addEventListener("click", async () => {
-      if (!confirm("Delete this credential set? Clients keep whatever was already applied.")) return;
-      await fetch(`/api/vault/sets/${btn.dataset.id}`, { method: "DELETE" });
-      refreshVault();
-    });
-  });
-}
-
-async function populateVaultClientSelect() {
-  const sel = $("vaultClientSelect");
-  if (!sel) return;
-  const prev = sel.value;
-  const names = await (await fetch("/api/client-names")).json().catch(() => []);
-  sel.innerHTML = (names || []).map((n) =>
-    `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join("");
-  if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
-}
-
-async function submitVaultForm(e) {
-  e.preventDefault();
-  const fd = new FormData(e.target);
-  const kind = fd.get("kind");
-  const status = $("vaultFormStatus");
-  const body = { name: fd.get("name"), kind, values: {}, id: fd.get("id") || null };
-  for (const [k, v] of fd.entries()) {
-    if (k.startsWith("v_") && String(v).trim()) body.values[k.slice(2)] = v;
-  }
-  if (kind === "file/google_tts") {
-    const file = ($("vaultFileInput") || {}).files?.[0];
-    if (!file) { status.textContent = "pick the google_tts.json file first"; return; }
-    body.content_b64 = btoa(String.fromCharCode(...new Uint8Array(await file.arrayBuffer())));
-  }
-  status.textContent = "saving…";
-  const r = await fetch("/api/vault/sets", {
-    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-  const data = await r.json().catch(() => ({}));
-  status.textContent = r.ok ? "saved" : (data.detail || "failed");
-  if (r.ok) { e.target.reset(); renderVaultFields(); refreshVault(); }
-}
-
-async function vaultImport() {
-  const client = $("vaultClientSelect").value;
-  const status = $("vaultApplyStatus");
-  status.textContent = "importing…";
-  const r = await fetch("/api/vault/import", {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ client_name: client }) });
-  const data = await r.json().catch(() => ({}));
-  status.textContent = r.ok
-    ? `imported ${data.created?.length ?? 0} set(s) from ${client}`
-    : (data.detail || data.error || "import failed");
-  refreshVault();
-}
-
-async function vaultApply() {
-  const client = $("vaultClientSelect").value;
-  const setIds = [...document.querySelectorAll(".vault-pick:checked")].map((i) => i.value);
-  const status = $("vaultApplyStatus");
-  if (!setIds.length) { status.textContent = "check at least one set in the table above"; return; }
-  status.textContent = "applying + testing + recreating…";
-  const r = await fetch(`/api/clients/${encodeURIComponent(client)}/apply-credentials`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ set_ids: setIds }) });
-  const data = await r.json().catch(() => ({}));
-  const tests = (data.tests || []).map((t) => `${t.kind}:${t.ok ? "ok" : "FAIL"}`).join(" ");
-  status.textContent = data.ok
-    ? `applied ${data.applied?.join(", ")} — container recreated. ${tests}`
-    : `${data.error || data.detail || "failed"} ${tests}`;
-}
+// Moved to credentials.js (vault v2, docs/TOKEN_ECONOMY_PLAN.md Phase 1) —
+// the start of the app.js split. credentials.js loads AFTER this file and
+// defines the globals switchPage() calls for the credentials page
+// (refreshVault, populateVaultClientSelect) plus all its own wiring.
 
 // -- wiring ------------------------------------------------------------------
 
@@ -1768,7 +1667,7 @@ document.addEventListener("DOMContentLoaded", () => {
   document.querySelectorAll("#mainTabs .tab").forEach((btn) => {
     btn.addEventListener("click", () => switchPage(btn.dataset.page));
   });
-  $("openLegacyCredsBtn").addEventListener("click", () => openCredsModal());
+  // openLegacyCredsBtn + all vault element wiring: credentials.js
 
   $("obForm").addEventListener("submit", submitObForm);
   // Auto-suggest the subdomain from the deploy name while the subdomain
@@ -1788,10 +1687,6 @@ document.addEventListener("DOMContentLoaded", () => {
     show("obTeardownConfirm"); show("obTeardownGo");
   });
   $("obTeardownGo").addEventListener("click", teardownCurrent);
-  $("vaultKindSelect").addEventListener("change", renderVaultFields);
-  $("vaultForm").addEventListener("submit", submitVaultForm);
-  $("vaultImportBtn").addEventListener("click", vaultImport);
-  $("vaultApplyBtn").addEventListener("click", vaultApply);
   // "Run tests…" in the detail modal: jump to the Tests tab with this
   // client preselected — running is one deliberate click away, since the
   // chat round-trip costs real LLM tokens.
@@ -1802,7 +1697,6 @@ document.addEventListener("DOMContentLoaded", () => {
     testSelected = new Set([name]);
     switchPage("tests");
   });
-  renderVaultFields();
 });
 
 // ===========================================================================
