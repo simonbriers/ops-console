@@ -24,6 +24,7 @@ from backend import onboarding as onboarding_mod
 from backend import smoke as smoke_mod
 from backend import validator as validator_mod
 from backend import ledger as ledger_mod
+from backend import model_catalog as model_catalog_mod
 from backend import vault as vault_mod
 from backend import config_manager as config_manager_mod
 
@@ -1296,6 +1297,14 @@ class SourceRatesIn(BaseModel):
     cap_tokens: int | None = None   # monthly cap → source renders as a real tank
 
 
+class ModelRateIn(BaseModel):
+    model: str
+    provider: str = ""
+    buy_in: float = 0       # € per 1k input tokens
+    buy_cached: float = 0
+    buy_out: float = 0
+
+
 @router.get("/ledger/summary")
 def ledger_summary() -> dict[str, Any]:
     return ledger_mod.summary()
@@ -1338,6 +1347,24 @@ def ledger_source_rates(body: SourceRatesIn) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"no vault set {body.set_id!r}")
     return ledger_mod.set_source_rates(body.set_id, body.buy_in, body.buy_cached,
                                        body.buy_out, body.cap_tokens)
+
+
+@router.get("/model-catalog")
+def model_catalog_get() -> dict[str, Any]:
+    """The selectable-model catalog (config picker) plus the live per-model
+    buy rates (€/1k) the ledger prices by-model usage from. `catalog` carries
+    published prices in each model's native unit (LLM per 1M tokens, STT per
+    audio-minute, TTS per character); `rates` is the editable €/1k LLM table."""
+    return {"catalog": model_catalog_mod.MODEL_CATALOG,
+            "roles": list(model_catalog_mod.ROLES),
+            "rates": ledger_mod.get_model_rates()}
+
+
+@router.post("/ledger/model-rates")
+def ledger_model_rates(body: ModelRateIn) -> dict[str, Any]:
+    """Override / add one model's €/1k buy rate (seeded from the catalog)."""
+    return ledger_mod.set_model_rate(body.model, body.provider, body.buy_in,
+                                     body.buy_cached, body.buy_out)
 
 
 @router.get("/ledger/statement/{name}")

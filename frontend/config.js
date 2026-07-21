@@ -14,16 +14,12 @@
 let cfgCatalog = null;      // [{key,title,fields:[...]}] from /api/config-catalog
 let cfgCurrent = null;      // last GET /api/clients/{name}/config payload
 let cfgOriginal = {};       // field name -> value as loaded (change tracking)
+let cfgModelCatalog = null; // {catalog:[...], roles:[...], rates:[...]} from /api/model-catalog
 
-// Known-model quick picks for type:"model" fields. CONVENIENCE ONLY — the
-// authoritative rate-limit facts live in the vault set's notes, rendered
-// from llm_source right above the form (D-notes: facts live on the source).
-const CFG_MODEL_SUGGESTIONS = [
-  "mistral-small-2506",
-  "mistral-medium-2508",
-  "mistral-large-latest",
-  "open-mistral-nemo",
-];
+// Fallback model ids for a type:"model" field when /api/model-catalog is
+// unreachable — the field stays free-text either way, so you can always test
+// an unlisted model; the catalog just makes valid ones discoverable + priced.
+const CFG_MODEL_FALLBACK = ["mistral-small-2506", "mistral-large-2512"];
 
 async function refreshConfigPage() {
   if (!cfgCatalog) {
@@ -34,7 +30,39 @@ async function refreshConfigPage() {
       return;
     }
   }
+  if (!cfgModelCatalog) {
+    try {
+      cfgModelCatalog = await (await fetch("/api/model-catalog")).json();
+    } catch {
+      cfgModelCatalog = { catalog: [], roles: [], rates: [] };  // fall back to free text
+    }
+  }
   await populateCfgClientSelect();
+}
+
+// Catalog entries offered for a type:"model" field: filtered by the field's
+// role and, when the sibling provider field's value is known and matches at
+// least one entry, by that provider too.
+function cfgModelsForField(f) {
+  const all = (cfgModelCatalog && cfgModelCatalog.catalog) || [];
+  let subset = f.role ? all.filter((m) => m.role === f.role) : all.slice();
+  const prov = f.provider_field ? cfgOriginal[f.provider_field] : "";
+  if (prov) {
+    const byProv = subset.filter((m) => String(m.provider) === String(prov));
+    if (byProv.length) subset = byProv;
+  }
+  return subset;
+}
+
+// One-line price label in the model's native unit (D1: LLM per 1M tokens,
+// STT per audio-minute, TTS per character).
+function cfgModelPriceLabel(m) {
+  if (m.role === "llm") {
+    return `€${m.buy_in_per_m}/${m.buy_out_per_m} per 1M in/out · cached €${m.buy_cached_per_m}`;
+  }
+  if (m.unit === "audio_minute") return `€${m.buy_per_unit}/min`;
+  if (m.unit === "character") return `€${m.buy_per_unit}/char`;
+  return "";
 }
 
 async function populateCfgClientSelect() {
@@ -164,10 +192,17 @@ function cfgFieldRow(f, val, managedInstance) {
     input = `<input type="number" step="any" id="${id}" value="${escapeHtml(String(v))}" />`;
   } else if (f.type === "model") {
     const listId = `${id}-models`;
+    const models = cfgModelsForField(f);
+    const ids = models.length ? models.map((m) => m.id) : CFG_MODEL_FALLBACK;
     input = `<input id="${id}" value="${escapeHtml(String(v))}" list="${listId}" />` +
       `<datalist id="${listId}">` +
-      CFG_MODEL_SUGGESTIONS.map((m) => `<option value="${m}"></option>`).join("") +
+      ids.map((m) => `<option value="${escapeHtml(m)}"></option>`).join("") +
       `</datalist>`;
+    if (models.length) {
+      input += `<div class="cfg-model-prices">` + models.map((m) =>
+        `<div><code>${escapeHtml(m.id)}</code> <span class="muted">${escapeHtml(cfgModelPriceLabel(m))}${m.default ? " · default" : ""}</span></div>`
+      ).join("") + `</div>`;
+    }
   } else {  // text / password
     input = `<input type="${f.type === "password" ? "password" : "text"}" id="${id}" value="${escapeHtml(String(v))}" />`;
   }

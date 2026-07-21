@@ -55,7 +55,8 @@ from backend.config import DEFAULT_CONFIG_PATH, load_clients, save_clients
 
 def _f(name: str, label: str, ftype: str = "text", managed: bool = False,
        path: str | None = "", options: list[str] | None = None,
-       hint: str = "") -> dict[str, Any]:
+       hint: str = "", role: str | None = None,
+       provider_field: str | None = None) -> dict[str, Any]:
     if path == "":  # default: site.<name> — the common case
         path = f"site.{name}"
     d = {"name": name, "label": label, "type": ftype, "managed": managed,
@@ -64,6 +65,10 @@ def _f(name: str, label: str, ftype: str = "text", managed: bool = False,
         d["options"] = options
     if hint:
         d["hint"] = hint
+    if role:  # type:"model" fields — which model_catalog role to offer, and
+        d["role"] = role  # which sibling field holds the provider to filter by
+    if provider_field:
+        d["provider_field"] = provider_field
     return d
 
 
@@ -98,6 +103,7 @@ FIELD_GROUPS: list[dict[str, Any]] = [
            path="llm.provider",
            options=["mistral", "nvidia", "openrouter", "ollama"]),
         _f("llm_model", "Model", "model", managed=True, path="llm.model",
+           role="llm", provider_field="llm_provider",
            hint="Fleet policy: mistral-small (2.25M tok/min, 5 req/s) by "
                 "default; medium/large only as named exceptions — see the "
                 "LLM source notes shown above the picker."),
@@ -154,8 +160,9 @@ FIELD_GROUPS: list[dict[str, Any]] = [
            managed=True, path="voice.max_session_minutes"),
         _f("voice_stt_provider", "STT provider", managed=True,
            path="voice.stt.provider"),
-        _f("voice_stt_model", "STT model", managed=True,
-           path="voice.stt.model"),
+        _f("voice_stt_model", "STT model", "model", managed=True,
+           path="voice.stt.model", role="stt",
+           provider_field="voice_stt_provider"),
         _f("voice_tts_provider", "TTS provider", managed=True,
            path="voice.tts.provider"),
         _f("voice_tts_voice_es", "TTS voice (ES)", managed=True,
@@ -165,7 +172,8 @@ FIELD_GROUPS: list[dict[str, Any]] = [
         _f("voice_llm_provider", "Voice LLM provider", managed=True,
            path="voice.llm.provider"),
         _f("voice_llm_model", "Voice LLM model", "model", managed=True,
-           path="voice.llm.model"),
+           path="voice.llm.model", role="llm",
+           provider_field="voice_llm_provider"),
     ]},
     {"key": "plan", "title": "Plan (pushed by Tokens tab)", "fields": [
         _f("plan_included_tokens", "Included tokens (0 clears the gauge)",

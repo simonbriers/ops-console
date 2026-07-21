@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Any
 
 from backend import config as cfg
+from backend import model_catalog
 from backend import vault as vault_mod
 from backend.core import _admin_get_json, _month_bounds
 
@@ -100,6 +101,20 @@ def _db() -> sqlite3.Connection:
         conn.execute("ALTER TABLE plans ADD COLUMN base_fee_eur REAL")
     except sqlite3.OperationalError:
         pass
+    # Per-model buy rates (€/1k tokens), keyed by model id — the item-#9
+    # refinement: usage is already snapshotted by-model, so a paid source can
+    # be priced at each model's real rate instead of one blended per-source
+    # number. Seeded (INSERT OR IGNORE) from model_catalog so an operator edit
+    # of a rate is never clobbered by the shipped default.
+    conn.execute("""CREATE TABLE IF NOT EXISTS model_rates (
+        model TEXT PRIMARY KEY, provider TEXT DEFAULT '',
+        buy_in REAL DEFAULT 0, buy_cached REAL DEFAULT 0,
+        buy_out REAL DEFAULT 0)""")
+    for m in model_catalog.llm_models_per_1k():
+        conn.execute(
+            "INSERT OR IGNORE INTO model_rates "
+            "(model, provider, buy_in, buy_cached, buy_out) VALUES (?,?,?,?,?)",
+            (m["id"], m["provider"], m["buy_in"], m["buy_cached"], m["buy_out"]))
     conn.execute("""CREATE TABLE IF NOT EXISTS alerts (
         ts TEXT NOT NULL, month TEXT NOT NULL, client TEXT NOT NULL,
         threshold INTEGER NOT NULL, pct_used REAL,
@@ -187,6 +202,29 @@ def set_source_rates(set_id: str, buy_in: float, buy_cached: float, buy_out: flo
             (set_id, float(buy_in or 0), float(buy_cached or 0), float(buy_out or 0),
              int(cap_tokens) if cap_tokens else None))
     return {"ok": True, "error": None}
+
+
+def set_model_rate(model: str, provider: str = "", buy_in: float = 0,
+                   buy_cached: float = 0, buy_out: float = 0) -> dict[str, Any]:
+    """Upsert one model's buy rate (€/1k tokens). Lets an operator override a
+    catalog default or price a model the catalog doesn't ship."""
+    with _db() as conn:
+        conn.execute(
+            "INSERT INTO model_rates (model, provider, buy_in, buy_cached, buy_out) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(model) DO UPDATE SET provider=excluded.provider, "
+            "buy_in=excluded.buy_in, buy_cached=excluded.buy_cached, "
+            "buy_out=excluded.buy_out",
+            (model, provider or "", float(buy_in or 0), float(buy_cached or 0),
+             float(buy_out or 0)))
+    return {"ok": True, "error": None}
+
+
+def get_model_rates() -> list[dict[str, Any]]:
+    with _db() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT model, provider, buy_in, buy_cached, buy_out "
+            "FROM model_rates ORDER BY model")]
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +347,10 @@ def _source_rate_map(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
     return {r["set_id"]: dict(r) for r in conn.execute("SELECT * FROM source_rates")}
 
 
+def _model_rate_map(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:
+    return {r["model"]: dict(r) for r in conn.execute("SELECT * FROM model_rates")}
+
+
 def _latest_per(conn: sqlite3.Connection, table: str, col: str, client: str,
                 month: str, cutoff_ts: str | None = None) -> dict[str, dict[str, int]]:
     where, params = "client=? AND month=?", [client, month]
@@ -353,6 +395,7 @@ def _client_economics(client: dict[str, Any], month: str) -> dict[str, Any]:
         then_by_alias = _latest_per(conn, "snap_key", "alias", name, month, cutoff)
         by_model = _latest_per(conn, "snap_model", "model", name, month)
         rates = _source_rate_map(conn)
+        model_rates = _model_rate_map(conn)
     usage = _sum(list(now_by_alias.values()))
     burn_24h = max(0, usage["total"] - _sum(list(then_by_alias.values()))["total"])
 
@@ -368,6 +411,20 @@ def _client_economics(client: dict[str, Any], month: str) -> dict[str, Any]:
                           "set_name": s["name"] if s else
                           ("local model" if alias == "local" else "(unknown key)"),
                           "buy_eur": alias_buy, **tokens})
+
+    # Per-model buy breakdown (item #9). Priced from model_rates, keyed by
+    # model id. Additive/informational — the authoritative buy_eur above stays
+    # the per-source (tier-aware, free-tier-€0) number so the verified Phase 3
+    # margin math is unchanged; this shows what each model WOULD cost at its
+    # own paid rate, and is what a later authoritative-per-model flip builds on.
+    buy_by_model = []
+    for m, tokens in sorted(by_model.items()):
+        mr = model_rates.get(m)
+        buy_by_model.append({
+            "model": m, **tokens,
+            "buy_eur": (_eur(tokens, mr["buy_in"], mr["buy_cached"], mr["buy_out"])
+                        if mr else None),
+            "priced": mr is not None})
 
     sell_raw = _eur(usage, plan["sell_in"], plan["sell_cached"], plan["sell_out"])
     allowance_eur = plan["allowance_eur"]
@@ -420,6 +477,7 @@ def _client_economics(client: dict[str, Any], month: str) -> dict[str, Any]:
             projected_empty = (datetime.now() + timedelta(days=days)).date().isoformat()
 
     return {"name": name, "plan": plan, "usage": usage, "by_model": by_model,
+            "buy_by_model": buy_by_model,
             "per_alias": per_alias, "eur_used": eur_used, "sell_raw": sell_raw,
             "buy_eur": round(buy_eur, 4), "buy_unpriced": unpriced,
             "included_eur": included, "overage_eur": overage,
@@ -525,8 +583,11 @@ def statement_markdown(data: dict[str, Any]) -> str:
         f"(input {e['usage']['input']:,} · cached {e['usage']['cached']:,} "
         f"· output {e['usage']['output']:,})",
     ]
+    buy_by_model = {b["model"]: b.get("buy_eur") for b in e.get("buy_by_model") or []}
     for m, u in sorted(e["by_model"].items()):
-        lines.append(f"  - {m}: {u['total']:,}")
+        bm = buy_by_model.get(m)
+        suffix = f" · buy €{bm:.4f}" if bm is not None else ""
+        lines.append(f"  - {m}: {u['total']:,}{suffix}")
     base_fee = p.get("base_fee_eur") or 0.0
     lines += ["", "## Charges"]
     if p["allowance_eur"]:

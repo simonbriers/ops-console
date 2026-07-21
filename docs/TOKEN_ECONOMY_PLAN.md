@@ -66,6 +66,30 @@ NEXT: rehearse Phase 6+7 end to end on acme (checklist in the day-3
 kickoff prompt), then convert PrimeConnect/chat.* deliberately, then
 Phase 8 (voice metering).
 
+Status (2026-07-21, day 3, pre-rehearsal): **Model catalog + per-model
+pricing BUILT (code complete, syntax-checked; ops-console has no pytest
+harness so verified via py_compile + a pure numeric check + the pending
+acme rehearsal).** New `backend/model_catalog.py` is the single source of
+truth for selectable models: mistral-small-2506 + mistral-large-2512
+(LLM, €/1M tokens), voxtral-mini-latest + voxtral-mini-transcribe-realtime
+(STT, €/audio-min) and voxtral-mini-tts-2603 (TTS, €/**character** — the
+unit catch: the page's "per minute" was really per char, ≈€13.6/M).
+nemo is deliberately excluded (abandoned — too many errors). The config
+picker (`config.js` type:"model" fields — llm_model, voice_llm_model, and
+voice_stt_model, now model-typed) offers catalog ids filtered by
+role+provider with a price hint per model, while staying free-text so an
+unlisted model is still testable (`GET /api/model-catalog`). The ledger
+gained a `model_rates` table (€/1k, seeded INSERT-OR-IGNORE from the
+catalog's LLM entries so operator edits are never clobbered),
+`set_model_rate`/`get_model_rates`, `POST /api/ledger/model-rates`, and an
+**additive** `buy_by_model` breakdown in `_client_economics` (+ statement
+lines). Additive means the authoritative `buy_eur`/margin (the verified
+Phase-3 per-source, free-tier-€0 path) is UNCHANGED — buy_by_model shows
+what each model would cost at its own paid rate. Flipping per-model to be
+the authoritative buy (tier-gated so free sources stay €0) is the
+deliberate follow-up (see item #9). NEXT unchanged: the Phase 6+7 acme
+rehearsal; the model picker now strengthens rehearsal step 4.
+
 ---
 
 ## Part 1 — Analysis: what exists today
@@ -590,6 +614,18 @@ any `.env` change, schema changes need a reseed.
    medium 1.50/7.50, nemo 0.15/0.15, ministral 0.10–0.20 flat;
    Voxtral TTS $16/M chars, Transcribe realtime $0.006/min; batch −50%.
    July-2026 simulation: the ENTIRE fleet month ≈ $4.60 at paid rates.
+   **Day-3 update (2026-07-21): partially DONE.** `backend/model_catalog.py`
+   now holds the selectable models + their €-priced buy rates in native
+   units (LLM €/1M tokens, STT €/audio-min, TTS €/char — EUR, from
+   Mistral's 2026-07-21 page: small 0.085/0.255, large 0.425/1.275 per 1M
+   in/out, cached −90%). The ledger has a per-model `model_rates` table
+   (€/1k) seeded from it and a `buy_by_model` breakdown, but it is ADDITIVE
+   — the authoritative buy_eur is still the blended per-source rate. The
+   remaining step is making per-model the authoritative buy, tier-gated so
+   free-tier sources price at €0 regardless of model (today every source is
+   free-tier, so the two agree at €0 — this is why the flip is safe to
+   defer). Voice STT/TTS prices are registered but not yet metered
+   (Phase 8).
 10. **Mistral key split** (evidence 2026-07-20: provider meter shows
    36.9M tokens vs the smaller fleet total, incl. `labs-leanstral` —
    a Lean-proof coding agent no receptionist calls): create a separate
