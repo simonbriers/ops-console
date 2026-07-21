@@ -625,7 +625,13 @@ any `.env` change, schema changes need a reseed.
    free-tier sources price at €0 regardless of model (today every source is
    free-tier, so the two agree at €0 — this is why the flip is safe to
    defer). Voice STT/TTS prices are registered but not yet metered
-   (Phase 8).
+   (Phase 8). **The broader "how do models / keys / clients relate"
+   design — one scoped catalog, keys stay in the vault, the catalog never
+   holds keys, model NOT on the assignment — is written up in full (with a
+   locator table + phased build checklist) in
+   `docs/CATALOG_VAULT_REDESIGN.md` (2026-07-21, PARKED). Read that before
+   building the catalog-editor UI or flipping per-model pricing to
+   authoritative.**
 10. **Mistral key split** (evidence 2026-07-20: provider meter shows
    36.9M tokens vs the smaller fleet total, incl. `labs-leanstral` —
    a Lean-proof coding agent no receptionist calls): create a separate
