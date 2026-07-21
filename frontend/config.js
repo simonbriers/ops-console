@@ -16,10 +16,10 @@ let cfgCurrent = null;      // last GET /api/clients/{name}/config payload
 let cfgOriginal = {};       // field name -> value as loaded (change tracking)
 let cfgModelCatalog = null; // {catalog:[...], roles:[...], rates:[...]} from /api/model-catalog
 
-// Fallback model ids for a type:"model" field when /api/model-catalog is
-// unreachable — the field stays free-text either way, so you can always test
-// an unlisted model; the catalog just makes valid ones discoverable + priced.
-const CFG_MODEL_FALLBACK = ["mistral-small-2506", "mistral-large-2512"];
+// Sentinel select value that reveals the free-text box, so a type:"model"
+// field is a real dropdown of catalog models AND still lets you type an
+// unlisted model to test.
+const CFG_MODEL_CUSTOM = "__custom__";
 
 async function refreshConfigPage() {
   if (!cfgCatalog) {
@@ -63,6 +63,15 @@ function cfgModelPriceLabel(m) {
   if (m.unit === "audio_minute") return `€${m.buy_per_unit}/min`;
   if (m.unit === "character") return `€${m.buy_per_unit}/char`;
   return "";
+}
+
+// Show/hide the free-text box when a model <select> is set to Custom.
+function cfgOnModelSelect(name) {
+  const sel = document.getElementById(`cfgField-${name}`);
+  const custom = document.getElementById(`cfgField-${name}-custom`);
+  if (!sel || !custom) return;
+  if (sel.value === CFG_MODEL_CUSTOM) { custom.style.display = ""; custom.focus(); }
+  else custom.style.display = "none";
 }
 
 async function populateCfgClientSelect() {
@@ -191,18 +200,21 @@ function cfgFieldRow(f, val, managedInstance) {
   } else if (f.type === "number") {
     input = `<input type="number" step="any" id="${id}" value="${escapeHtml(String(v))}" />`;
   } else if (f.type === "model") {
-    const listId = `${id}-models`;
+    // Real dropdown of catalog models (price in the label) + a Custom option
+    // that reveals a text box, so unlisted models are still testable.
     const models = cfgModelsForField(f);
-    const ids = models.length ? models.map((m) => m.id) : CFG_MODEL_FALLBACK;
-    input = `<input id="${id}" value="${escapeHtml(String(v))}" list="${listId}" />` +
-      `<datalist id="${listId}">` +
-      ids.map((m) => `<option value="${escapeHtml(m)}"></option>`).join("") +
-      `</datalist>`;
-    if (models.length) {
-      input += `<div class="cfg-model-prices">` + models.map((m) =>
-        `<div><code>${escapeHtml(m.id)}</code> <span class="muted">${escapeHtml(cfgModelPriceLabel(m))}${m.default ? " · default" : ""}</span></div>`
-      ).join("") + `</div>`;
-    }
+    const curr = String(v === null || v === undefined ? "" : v);
+    const inList = models.some((m) => m.id === curr);
+    const opts = [`<option value="">(unset)</option>`]
+      .concat(models.map((m) =>
+        `<option value="${escapeHtml(m.id)}" ${curr === m.id ? "selected" : ""}>` +
+        `${escapeHtml(m.id)} — ${escapeHtml(cfgModelPriceLabel(m))}${m.default ? " (default)" : ""}</option>`))
+      .concat([`<option value="${CFG_MODEL_CUSTOM}" ${(!inList && curr) ? "selected" : ""}>Custom / other…</option>`]);
+    const customShown = !inList && curr;
+    input =
+      `<select id="${id}" onchange="cfgOnModelSelect('${f.name}')">${opts.join("")}</select>` +
+      `<input id="${id}-custom" class="cfg-model-custom" placeholder="type a model id" ` +
+      `value="${customShown ? escapeHtml(curr) : ""}" style="${customShown ? "" : "display:none"}" />`;
   } else {  // text / password
     input = `<input type="${f.type === "password" ? "password" : "text"}" id="${id}" value="${escapeHtml(String(v))}" />`;
   }
@@ -229,6 +241,10 @@ function readCfgField(f) {
     if (raw === "") return null;  // "unset" — will be skipped as unchanged unless it changed
     const n = Number(raw);
     return Number.isNaN(n) ? null : n;
+  }
+  if (f.type === "model" && el.value === CFG_MODEL_CUSTOM) {
+    const custom = document.getElementById(`cfgField-${f.name}-custom`);
+    return custom ? custom.value.trim() : "";
   }
   return el.value;
 }
