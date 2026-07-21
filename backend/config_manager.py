@@ -369,6 +369,12 @@ def _echo_matches(name: str, sent: Any, got: Any) -> bool:
 # ---------------------------------------------------------------------------
 
 _DRIFT_IGNORE_TOP = {"consultants", "services"}  # per-clinic data, not defaults
+# Dotted paths that are operational state, not defaults — their absence is
+# normal, not drift. site.managed absent = unmanaged (the correct default);
+# config_merge on the product side skips it for the same reason, so reporting
+# it as a "missing shipped default" is misleading noise on every unmanaged
+# instance. Keep this in sync with backend/config_merge.py's SKIP_PATHS.
+_DRIFT_IGNORE_PATHS = {"site.managed"}
 
 
 def _flatten(d: Any, prefix: str = "") -> dict[str, Any]:
@@ -408,7 +414,8 @@ def drift_check(client: dict[str, Any]) -> dict[str, Any]:
     shipped_flat = _flatten(shipped["parsed"])
     missing = sorted(
         k for k in shipped_flat
-        if k not in live_flat and k.split(".", 1)[0] not in _DRIFT_IGNORE_TOP)
+        if k not in live_flat and k.split(".", 1)[0] not in _DRIFT_IGNORE_TOP
+        and k not in _DRIFT_IGNORE_PATHS)
 
     written = get_written(client.get("name", ""))
     out_of_band = []
