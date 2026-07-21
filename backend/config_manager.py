@@ -505,7 +505,10 @@ def set_managed(client: dict[str, Any], enabled: bool) -> dict[str, Any]:
     # -- step 2: flip site.managed in the live volume file -------------------
     shell = core._shell_remote_dir(remote_dir)
     proj = core._project_name(remote_dir)
-    py = _SET_MANAGED_PY.format(value="True" if enabled else "False")
+    # .replace, NOT .format: the snippet contains literal {} braces (yaml
+    # `or {}`, setdefault("site", {})) that .format() would misread as
+    # positional fields (IndexError). Only the {value} token is substituted.
+    py = _SET_MANAGED_PY.replace("{value}", "True" if enabled else "False")
     cmd = (f"cd {shell} && docker compose -p {proj} exec -T app "
            f"python -c {shlex.quote(py)}")
     ok, out = core.run_ssh(ssh_target, cmd, timeout=40)
