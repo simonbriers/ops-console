@@ -453,11 +453,17 @@ def create_new_client_stream(
         # docker cp preserves the HOST file's ownership (the deploy user's),
         # which the container's app user can READ but not WRITE — so every
         # config save (admin panel, ops-console plan push) 500s with
-        # PermissionError. Bit acme on 2026-07-20, the first wizard-deployed
-        # instance to take a config write. chown to whatever owns /data (the
-        # app user — it creates site.sqlite there) right after the copy.
+        # PermissionError, AND the boot-time config_merge can't write either.
+        # Bit acme (2026-07-20) then Valor/PrimeConnect/demo (2026-07-21).
+        # Fix ownership to the app user (uid 10001, from the Dockerfile's
+        # `useradd --uid 10001 appuser`) EXPLICITLY and RECURSIVELY over the
+        # whole volume — NOT `chown --reference=/data`, which was the original
+        # bug: on a fresh named volume /data itself can init root-owned, so
+        # referencing it chowned the config to root and perpetuated the very
+        # problem. Explicit uid removes that dependency; -R also fixes
+        # site.sqlite and anything else the volume init left root-owned.
         f"docker exec -u root {deploy_name} sh -c "
-        f"'chown --reference=/data /data/site_config.yaml && chmod 664 /data/site_config.yaml' 2>&1 && "
+        f"'chown -R 10001:10001 /data && chmod 664 /data/site_config.yaml' 2>&1 && "
         # Seed-once marker: --reset wipes the DB, fine on a fresh instance,
         # destructive on a resumed one that may already hold real data.
         f"docker compose -p {deploy_name} -f {compose_file} -f {override_file} exec -T app "
