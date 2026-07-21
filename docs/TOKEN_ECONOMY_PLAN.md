@@ -90,6 +90,46 @@ the authoritative buy (tier-gated so free sources stay €0) is the
 deliberate follow-up (see item #9). NEXT unchanged: the Phase 6+7 acme
 rehearsal; the model picker now strengthens rehearsal step 4.
 
+Status (2026-07-21, day 3, **PHASES 6+7 REHEARSED END-TO-END ON ACME —
+GREEN**): the managed-mode surface is validated live: enable (with
+name-confirm), business + infra writes from the console while managed,
+per-model switching small↔large with chat round-trips, the clinic panel
+hiding infra (LLM tab gone, SMTP/Twilio/voice-tech hidden, secrets
+redacted), and drift detection catching AND clearing an out-of-band SSH
+edit. The rehearsal flushed out **three latent Phase-6/7 bugs, all fixed
+this session** (each was in code "BUILT but never run"):
+  1. **Managed-mode enable 500** — `config_manager.set_managed()` used
+     `str.format()` on the `_SET_MANAGED_PY` snippet, whose literal `{}`
+     YAML braces raised `IndexError`. Fixed: `.replace("{value}", …)`.
+  2. **SMS/Twilio infra fields stayed visible in the managed clinic
+     panel** (Email hid its SMTP fields correctly). Cause: `#twilio_fields`
+     carried `data-managed` AND the provider-toggle JS force-set its
+     `display`, overriding the hide. Fixed (dental
+     `frontend/admin/cfg-sms.html`): `data-managed` moved to an outer
+     wrapper; `SHELL_CACHE` → v19.
+  3. **Couldn't DISABLE (or re-enable) managed mode** — `core.recreate_app`
+     used `docker compose up -d` without `--force-recreate`, a no-op when
+     only the /data volume config changed (not `.env`/image). The app kept
+     its cached config, so the flag flip never took effect; verify reported
+     the old value. Only the FIRST enable ever worked (it added
+     `OPERATOR_TOKEN` to `.env`, changing the spec). Fixed: `up -d
+     --force-recreate app`.
+
+Also this session — **DEPLOYMENT.md §10 stale-config gap CLOSED (missing-key
+half).** New dental `backend/config_merge.py`, wired into
+`deploy/entrypoint.sh`, add-only merges missing shipped defaults into each
+instance's live `/data/site_config.yaml` on every boot (never overwrites
+existing values; skips `consultants`/`services` and — critically —
+`site.managed`, an operational flag the console owns; a shipped default of
+`false` there would silently un-manage instances). Proven live: acme's
+drift went **36 → 0**. Tests: `backend/tests/test_config_merge.py`. The
+changed-VALUE half (e.g. purple→teal brand_color) stays manual by design.
+Design for the fuller catalog/vault entity model is parked in
+`docs/CATALOG_VAULT_REDESIGN.md`. NEXT: roll the fleet update (Valor →
+`chat.*` → `primeconnectai.*`) so every instance gets the live-tray fix +
+self-heals its config; then convert PrimeConnect as the first real managed
+instance, or Phase 8 (voice metering).
+
 ---
 
 ## Part 1 — Analysis: what exists today
