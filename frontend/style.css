@@ -390,3 +390,30 @@ strong.down { color: var(--down); }
 .flow-pipe.flow-fast { animation-duration: 0.55s; stroke: #5b93b8; }
 @keyframes flowdash { to { stroke-dashoffset: -12; } }
 .flow-detail { margin-top: 1rem; border-top: 1px solid #ececf0; padding-top: 0.8rem; }
+
+/* ---- Config tab (config manager, TOKEN_ECONOMY_PLAN.md Phase 7) -------- */
+.cfg-badge { display: inline-block; font-size: 10px; font-weight: 700;
+  letter-spacing: 0.08em; text-transform: uppercase; padding: 1px 7px;
+  border-radius: 9px; background: #eef0f4; color: #667; vertical-align: middle; }
+.cfg-badge-managed { background: #fdeeda; color: #a05a00; }
+.cfg-badge-business { background: #e4f3ea; color: #1e7145; }
+.cfg-managed-bar { align-items: center; }
+.cfg-llm-source { margin-bottom: 0.8rem; }
+.cfg-source-notes { background: #f7f8fa; border: 1px solid #ececf0;
+  border-radius: 6px; padding: 8px 10px; font-size: 12px; white-space: pre-wrap;
+  margin: 6px 0 0; }
+.cfg-group { border: 1px solid #ececf0; border-radius: 8px;
+  margin: 0 0 1rem; padding: 0.7rem 1rem 0.9rem; }
+.cfg-group legend { font-weight: 700; font-size: 13px; padding: 0 6px; }
+.cfg-field-row { display: grid; grid-template-columns: 260px 1fr;
+  gap: 4px 12px; align-items: center; margin-bottom: 6px; }
+.cfg-field-row label { font-size: 12.5px; }
+.cfg-field-row input[type="text"], .cfg-field-row input[type="password"],
+.cfg-field-row input[type="number"], .cfg-field-row input:not([type]),
+.cfg-field-row select, .cfg-field-row textarea { width: 100%; box-sizing: border-box; }
+.cfg-field-row .cfg-hint { grid-column: 2; font-size: 11.5px; }
+.cfg-raw { background: #f7f8fa; border: 1px solid #ececf0; border-radius: 8px;
+  padding: 10px 12px; font-size: 12px; overflow-x: auto; }
+.cfg-drift table { width: 100%; margin: 0.4rem 0 0.8rem; }
+.cfg-drift h4 { margin: 0.7rem 0 0.3rem; }
+.cfg-drift .ok, .ok { color: #1e7145; }

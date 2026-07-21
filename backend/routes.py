@@ -25,6 +25,7 @@ from backend import smoke as smoke_mod
 from backend import validator as validator_mod
 from backend import ledger as ledger_mod
 from backend import vault as vault_mod
+from backend import config_manager as config_manager_mod
 
 router = APIRouter(prefix="/api")
 
@@ -56,6 +57,14 @@ class ClientIn(BaseModel):
     # ADMIN_TUNNEL_ONLY, and keeps the admin token off the public internet.
     admin_via_ssh: bool = False
     admin_local_port: int | None = None
+    # Managed mode (Phase 6/7): the per-instance OPERATOR_TOKEN this console
+    # presents as X-Operator-Token on admin API calls. Generated + written to
+    # the instance's .env by the config manager's "enable managed mode"
+    # action (config_manager.set_managed); same trust class as admin_token.
+    # MUST stay in this model — edit_client() replaces the whole record with
+    # body.model_dump(), so a field missing here would be silently dropped
+    # from clients.json on the next UI edit.
+    operator_token: str = ""
 
 
 class SettingsIn(BaseModel):
@@ -152,9 +161,16 @@ def edit_client(name: str, body: ClientIn) -> dict[str, Any]:
     clients = cfg.load_clients()
     for i, c in enumerate(clients):
         if c.get("name") == name:
-            clients[i] = body.model_dump()
+            updated = body.model_dump()
+            # The Edit Client form predates managed mode and doesn't carry
+            # operator_token — an empty value here means "not touched", not
+            # "clear it", or every routine client edit would silently break
+            # the console's access to that managed instance.
+            if not updated.get("operator_token") and c.get("operator_token"):
+                updated["operator_token"] = c["operator_token"]
+            clients[i] = updated
             cfg.save_clients(clients)
-            return body.model_dump()
+            return updated
     raise HTTPException(status_code=404, detail=f"No client named {name!r}")
 
 
@@ -1387,3 +1403,117 @@ def ledger_push_plan(name: str, body: PushPlanIn) -> dict[str, Any]:
                                    "it's running a build from before Phase 5. Update it "
                                    "(Updates tab), then push again.")
     return {"ok": True, "error": None, "pushed": payload, "client": name}
+
+
+# ---------------------------------------------------------------------------
+# Config manager (TOKEN_ECONOMY_PLAN.md Phase 7)
+# ---------------------------------------------------------------------------
+
+class ConfigWriteIn(BaseModel):
+    fields: dict[str, Any]
+
+
+class ManagedModeIn(BaseModel):
+    enabled: bool
+    # Same belt-and-suspenders as /deploy: flipping managed mode edits a live
+    # instance's .env + config and recreates its container — the server
+    # demands the typed client name, never trusting the browser alone.
+    confirm_name: str
+
+
+def _client_or_404(name: str) -> dict[str, Any]:
+    client = cfg.find_client(name)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+    return client
+
+
+def _refuse_frozen(name: str, action: str) -> None:
+    if ledger_mod.is_frozen(name):
+        raise HTTPException(status_code=423,
+                            detail=f"{name} is FROZEN — {action} is blocked. "
+                                   "Unfreeze on the Tokens tab first (rehearse on acme).")
+
+
+@router.get("/config-catalog")
+def config_catalog() -> list[dict[str, Any]]:
+    """The field groups the per-client Config page renders from — one source
+    of truth (config_manager.FIELD_GROUPS), tags business vs managed."""
+    return config_manager_mod.FIELD_GROUPS
+
+
+@router.get("/clients/{name}/config")
+def client_config_get(name: str) -> dict[str, Any]:
+    """Live config (API-first, SSH file fallback) + the vault's LLM-source
+    context for the model picker + this client's console-side state."""
+    client = _client_or_404(name)
+    result = config_manager_mod.get_live_config(client)
+    result["client"] = name
+    result["frozen"] = ledger_mod.is_frozen(name)
+    result["has_operator_token"] = bool(client.get("operator_token"))
+    result["llm_source"] = config_manager_mod.llm_source_info(name)
+    result["last_written"] = config_manager_mod.get_written(name)
+    return result
+
+
+@router.put("/clients/{name}/config")
+def client_config_put(name: str, body: ConfigWriteIn) -> dict[str, Any]:
+    """Write flat config fields through the instance's validated PUT
+    /admin/config (operator token rides along via core._admin_put_json)."""
+    client = _client_or_404(name)
+    _refuse_frozen(name, "a config write")
+    result = config_manager_mod.write_config(client, body.fields)
+    if not result["ok"]:
+        raise HTTPException(status_code=502, detail=result["error"])
+    return result
+
+
+@router.get("/clients/{name}/config/drift")
+def client_config_drift(name: str) -> dict[str, Any]:
+    """Three-way drift check: live volume file vs shipped defaults vs the
+    console's last-written state. Read-only (safe on frozen clients)."""
+    client = _client_or_404(name)
+    return config_manager_mod.drift_check(client)
+
+
+@router.post("/clients/{name}/managed-mode")
+def client_managed_mode(name: str, body: ManagedModeIn) -> dict[str, Any]:
+    """Enable/disable managed mode: OPERATOR_TOKEN provisioning + the
+    site.managed flag (SSH, inside the container) + container recreate +
+    verification. The flag is deliberately unreachable via the instance's
+    own API — see config_manager.set_managed."""
+    client = _client_or_404(name)
+    _refuse_frozen(name, "flipping managed mode")
+    if body.confirm_name != name:
+        raise HTTPException(status_code=400,
+                            detail="confirm_name does not match the client name")
+    result = config_manager_mod.set_managed(client, body.enabled)
+    if not result["ok"]:
+        raise HTTPException(status_code=502,
+                            detail={"error": result["error"],
+                                    "steps": result["steps"]})
+    return result
+
+
+@router.post("/clients/{name}/fetch-operator-token")
+def client_fetch_operator_token(name: str) -> dict[str, Any]:
+    """Recovery path: pull OPERATOR_TOKEN from the instance's .env over SSH
+    into clients.json (e.g. after re-adding a client the console forgot) —
+    the operator-token twin of /fetch-token."""
+    client = _client_or_404(name)
+    env_read = env_tool.read_remote_env(client.get("ssh_target", ""),
+                                        client.get("remote_dir", ""))
+    if not env_read["ok"]:
+        raise HTTPException(status_code=502,
+                            detail=f"SSH read failed: {env_read['error']}")
+    token = (env_read["env"] or {}).get("OPERATOR_TOKEN", "")
+    if not token:
+        raise HTTPException(status_code=404,
+                            detail="No OPERATOR_TOKEN in that instance's .env — "
+                                   "enable managed mode to generate one.")
+    clients = cfg.load_clients()
+    for c in clients:
+        if c.get("name") == name:
+            c["operator_token"] = token
+    cfg.save_clients(clients)
+    return {"ok": True, "error": None, "client": name}

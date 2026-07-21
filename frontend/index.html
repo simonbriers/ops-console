@@ -23,6 +23,7 @@
       <button class="tab" data-page="credentials">Credentials</button>
       <button class="tab" data-page="ledger">Tokens</button>
       <button class="tab" data-page="flow">Flow</button>
+      <button class="tab" data-page="config">Config</button>
       <button class="tab" data-page="host">Host / VPS</button>
       <button class="tab tab-right" id="settingsBtn">Settings</button>
     </nav>
@@ -366,6 +367,31 @@
         <div id="flowDetail" class="flow-detail hidden"></div>
       </section>
     </div><!-- /page-flow -->
+
+    <div id="page-config" class="page hidden">
+      <section class="ob-panel">
+        <h3>Config manager</h3>
+        <p class="muted">A console-side window onto each instance's live
+        <code>site_config.yaml</code> (TOKEN_ECONOMY_PLAN.md Phase 7). Reads and writes go
+        through the instance's own validated <code>/admin/config</code> API (the
+        <strong>operator token</strong> rides along for managed instances); the SSH file read
+        is the fallback for a down instance and the basis of <strong>drift detection</strong>.
+        Fields tagged <span class="cfg-badge cfg-badge-managed">managed</span> are console-only
+        on managed instances; everything else the clinic can also edit in its own panel.</p>
+        <div class="ob-form">
+          <label>Client <select id="cfgClientSelect"></select></label>
+          <button type="button" id="cfgLoadBtn">Load</button>
+          <button type="button" id="cfgDriftBtn">Check drift</button>
+          <span id="cfgStatus" class="muted"></span>
+        </div>
+        <div id="cfgManagedBar"></div>
+        <div id="cfgDriftPanel"></div>
+      </section>
+      <section class="ob-panel">
+        <div id="cfgLlmSource"></div>
+        <div id="cfgGroups"><p class="empty">Pick a client and press Load.</p></div>
+      </section>
+    </div><!-- /page-config -->
   </main>
 
   <!-- Detail modal -->
@@ -579,5 +605,7 @@
   <script src="/static/ledger.js?v=ledger-5"></script>
   <!-- Flow tab (tanks & pipes visual, Phase 4). -->
   <script src="/static/flow.js?v=flow-1"></script>
+  <!-- Config tab (config manager, Phase 7). -->
+  <script src="/static/config.js?v=cfgmgr-1"></script>
 </body>
 </html>

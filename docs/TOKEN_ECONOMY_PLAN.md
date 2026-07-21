@@ -34,6 +34,38 @@ new_client.py + chown on acme). NEXT: Phase 6 (managed mode) + Phase 7
 (config manager), rehearse on acme; then Phase 8 (voice metering).
 Read Part 5 (rollout safety) before touching any live instance.
 
+Status (2026-07-20, end of build day 2): **Phases 6 + 7 BUILT (code
+complete, syntax-checked), NOT yet rehearsed on acme.** Product side
+(dental repo, CHANGELOG Sprint 37): `site.managed` flag (default false,
+SSH-file-edit-only by design), `MANAGED_CONFIG_FIELDS` + atomic 403
+enforcement in PUT /admin/config behind `X-Operator-Token` ==
+`OPERATOR_TOKEN` env (on top of admin auth; empty never matches), secret
+redaction (SMTP password/Twilio token) on non-operator reads while
+managed, `managed`+`managed_fields` in GET /admin/config, `managed` in
+public /config, admin-panel hiding via `[data-managed]` sections +
+`stripManagedConfigFields()` + cfg-llm nav removal (SHELL_CACHE v18),
+tests in `backend/tests/test_managed_mode.py`. Judgment calls settled:
+`voice.enabled` + `scheduling_granularity_minutes` + `max_input_chars`
+console-owned; `email_enabled`/`sms_enabled` + voice greetings +
+`admin_password` stay business. Console side: new
+`backend/config_manager.py` (field catalog tagged business/managed with
+YAML paths, API-first read/write with echo-verify + last-written state in
+`config_state.json`, SSH fallback read, three-way `drift_check()` —
+missing shipped defaults = the §10 stale-config gap + out-of-band edits
+of console-written fields, `set_managed()` = .env OPERATOR_TOKEN
+provisioning + in-container YAML flip + recreate + verify), operator
+token on BOTH `_admin_get_json`/`_admin_put_json` transports,
+`operator_token` on the client record (preserved across edit_client, so
+old Edit Client forms can't wipe it; `/fetch-operator-token` recovery
+route), new Config tab (`frontend/config.js`, per the app.js-split rule)
+with per-group changed-fields-only saves, model picker showing the vault
+LLM source's notes, drift panel, and the confirm-name-gated
+enable/disable managed mode action (frozen clients: config writes and
+managed flips are 423-blocked; drift check stays allowed — read-only).
+NEXT: rehearse Phase 6+7 end to end on acme (checklist in the day-3
+kickoff prompt), then convert PrimeConnect/chat.* deliberately, then
+Phase 8 (voice metering).
+
 ---
 
 ## Part 1 — Analysis: what exists today

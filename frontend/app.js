@@ -1301,7 +1301,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 // -- tab navigation ----------------------------------------------------------
 
-const PAGES = ["dashboard", "updates", "tests", "onboarding", "credentials", "ledger", "flow", "host"];
+const PAGES = ["dashboard", "updates", "tests", "onboarding", "credentials", "ledger", "flow", "config", "host"];
 
 function switchPage(page) {
   PAGES.forEach((p) => {
@@ -1317,6 +1317,7 @@ function switchPage(page) {
   if (page === "credentials") { refreshVault(); populateVaultClientSelect(); }
   if (page === "ledger") refreshLedger();      // ledger.js
   if (page === "flow") refreshFlow();          // flow.js
+  if (page === "config") refreshConfigPage();  // config.js
 }
 
 // -- onboarding stepper ------------------------------------------------------

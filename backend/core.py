@@ -1143,6 +1143,11 @@ def _admin_get_json(client: dict[str, Any], path: str, params: dict[str, Any]) -
     Raises on any transport or parse failure; callers already catch broadly.
     """
     token = _real_token(client)
+    # Managed instances (product Phase 6): the operator token, when this
+    # client has one recorded, rides along on EVERY admin call — GETs need
+    # it too (managed instances redact SMTP/Twilio secrets from non-operator
+    # reads). Harmless on unmanaged instances, which ignore the header.
+    op_token = client.get("operator_token") or ""
     if client.get("admin_via_ssh"):
         port = client.get("admin_local_port")
         ssh_target = client.get("ssh_target") or ""
@@ -1152,14 +1157,18 @@ def _admin_get_json(client: dict[str, Any], path: str, params: dict[str, Any]) -
             raise RuntimeError("admin_via_ssh is set but ssh_target is missing")
         url = f"http://127.0.0.1:{int(port)}{path}?{urlencode(params)}"
         cmd = ("curl -fsS -m 15 -H " + shlex.quote(f"X-Admin-Token: {token}")
+               + (" -H " + shlex.quote(f"X-Operator-Token: {op_token}") if op_token else "")
                + " " + shlex.quote(url))
         ok, out = run_ssh(ssh_target, cmd, timeout=SSH_TIMEOUT + 10)
         if not ok:
             raise RuntimeError(f"ssh admin fetch failed: {out[:300]}")
         return json.loads(out)
     base = (client.get("base_url") or "").rstrip("/")
+    headers = {"X-Admin-Token": token}
+    if op_token:
+        headers["X-Operator-Token"] = op_token
     resp = requests.get(f"{base}{path}", params=params,
-                        headers={"X-Admin-Token": token}, timeout=HTTP_TIMEOUT)
+                        headers=headers, timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
     return resp.json()
 
@@ -1173,6 +1182,10 @@ def _admin_put_json(client: dict[str, Any], path: str, payload: dict[str, Any]) 
     /admin/config), never raw file edits. Raises on transport/parse failure;
     callers catch broadly."""
     token = _real_token(client)
+    # Operator token (managed mode, product Phase 6): required for writes
+    # touching MANAGED_CONFIG_FIELDS on a managed instance; ignored by
+    # unmanaged ones. Sent whenever the client record has one.
+    op_token = client.get("operator_token") or ""
     body = json.dumps(payload)
     if client.get("admin_via_ssh"):
         port = client.get("admin_local_port")
@@ -1183,6 +1196,7 @@ def _admin_put_json(client: dict[str, Any], path: str, payload: dict[str, Any]) 
             raise RuntimeError("admin_via_ssh is set but ssh_target is missing")
         url = f"http://127.0.0.1:{int(port)}{path}"
         cmd = ("curl -fsS -m 20 -X PUT -H " + shlex.quote(f"X-Admin-Token: {token}")
+               + (" -H " + shlex.quote(f"X-Operator-Token: {op_token}") if op_token else "")
                + " -H " + shlex.quote("Content-Type: application/json")
                + " --data " + shlex.quote(body) + " " + shlex.quote(url))
         ok, out = run_ssh(ssh_target, cmd, timeout=SSH_TIMEOUT + 15)
@@ -1190,9 +1204,11 @@ def _admin_put_json(client: dict[str, Any], path: str, payload: dict[str, Any]) 
             raise RuntimeError(f"ssh admin put failed: {out[:300]}")
         return json.loads(out)
     base = (client.get("base_url") or "").rstrip("/")
+    headers = {"X-Admin-Token": token, "Content-Type": "application/json"}
+    if op_token:
+        headers["X-Operator-Token"] = op_token
     resp = requests.put(f"{base}{path}", data=body,
-                        headers={"X-Admin-Token": token,
-                                 "Content-Type": "application/json"},
+                        headers=headers,
                         timeout=HTTP_TIMEOUT)
     resp.raise_for_status()
     return resp.json()
