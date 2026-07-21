@@ -15,6 +15,7 @@ let cfgCatalog = null;      // [{key,title,fields:[...]}] from /api/config-catal
 let cfgCurrent = null;      // last GET /api/clients/{name}/config payload
 let cfgOriginal = {};       // field name -> value as loaded (change tracking)
 let cfgModelCatalog = null; // {catalog:[...], roles:[...], rates:[...]} from /api/model-catalog
+let cfgOpenGroups = new Set();  // accordion: which section keys are expanded (kept across reloads)
 
 // Sentinel select value that reveals the free-text box, so a type:"model"
 // field is a real dropdown of catalog models AND still lets you type an
@@ -169,17 +170,39 @@ function renderCfgGroups(values) {
       cfgOriginal[f.name] = normalizeCfgValue(f, val);
       return cfgFieldRow(f, val, managedInstance);
     }).join("");
+    const open = cfgOpenGroups.has(group.key);
+    const count = group.fields.length;
     return `
       <fieldset class="cfg-group" data-group="${escapeHtml(group.key)}">
-        <legend>${escapeHtml(group.title)}</legend>
-        ${rows}
-        <div class="ob-form">
-          <button type="button" class="primary" onclick="cfgSaveGroup('${escapeHtml(group.key)}')">Save changed fields</button>
-          <span class="muted cfg-group-status" id="cfgGroupStatus-${escapeHtml(group.key)}"></span>
+        <legend class="cfg-group-legend" onclick="cfgToggleGroup('${escapeHtml(group.key)}')"
+                style="cursor:pointer; user-select:none;">
+          <span id="cfgGroupCaret-${escapeHtml(group.key)}">${open ? "▾" : "▸"}</span>
+          ${escapeHtml(group.title)}
+          <span class="muted">(${count})</span>
+        </legend>
+        <div id="cfgGroupBody-${escapeHtml(group.key)}" class="cfg-group-body"
+             style="${open ? "" : "display:none;"}">
+          ${rows}
+          <div class="ob-form">
+            <button type="button" class="primary" onclick="cfgSaveGroup('${escapeHtml(group.key)}')">Save changed fields</button>
+            <span class="muted cfg-group-status" id="cfgGroupStatus-${escapeHtml(group.key)}"></span>
+          </div>
         </div>
       </fieldset>`;
   }).join("");
   $("cfgGroups").innerHTML = html;
+}
+
+// Accordion toggle: expand/collapse one section, remembering the state so a
+// later cfgLoad() (which re-renders) keeps the same sections open.
+function cfgToggleGroup(key) {
+  const body = document.getElementById(`cfgGroupBody-${key}`);
+  const caret = document.getElementById(`cfgGroupCaret-${key}`);
+  if (!body) return;
+  const nowOpen = body.style.display === "none";
+  body.style.display = nowOpen ? "" : "none";
+  if (caret) caret.textContent = nowOpen ? "▾" : "▸";
+  if (nowOpen) cfgOpenGroups.add(key); else cfgOpenGroups.delete(key);
 }
 
 function cfgFieldRow(f, val, managedInstance) {
