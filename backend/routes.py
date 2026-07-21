@@ -162,16 +162,19 @@ def edit_client(name: str, body: ClientIn) -> dict[str, Any]:
     clients = cfg.load_clients()
     for i, c in enumerate(clients):
         if c.get("name") == name:
-            updated = body.model_dump()
-            # The Edit Client form predates managed mode and doesn't carry
-            # operator_token — an empty value here means "not touched", not
-            # "clear it", or every routine client edit would silently break
-            # the console's access to that managed instance.
-            if not updated.get("operator_token") and c.get("operator_token"):
-                updated["operator_token"] = c["operator_token"]
-            clients[i] = updated
+            # MERGE, not wholesale replace: apply only the fields the form
+            # actually sent (exclude_unset) onto the existing record. This is
+            # what lets the (revamped) Edit form show ONLY the fields worth
+            # editing without silently wiping the ones it omits — the
+            # managed-mode operator_token, and the dormant legacy
+            # monthly_token_quota / cost_per_1k_* that moved to the ledger.
+            # (The old code replaced the whole record and had to special-case
+            # operator_token by hand; this generalizes that safety.)
+            patch = body.model_dump(exclude_unset=True)
+            merged = {**c, **patch}
+            clients[i] = merged
             cfg.save_clients(clients)
-            return updated
+            return merged
     raise HTTPException(status_code=404, detail=f"No client named {name!r}")
 
 

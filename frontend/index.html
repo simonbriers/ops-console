@@ -459,11 +459,15 @@
       <button class="close" data-close="editModal">&times;</button>
       <h2 id="editTitle">Add client</h2>
       <form id="editForm">
+        <h4 class="edit-section">Identity</h4>
         <label>Name <input name="name" required /></label>
         <label>Public base URL <input name="base_url" placeholder="https://chat.example.com" required /></label>
+
+        <h4 class="edit-section">VPS / SSH</h4>
         <label>SSH target <input name="ssh_target" placeholder="deploy@host" /></label>
         <label>Remote compose dir <input name="remote_dir" placeholder="~/dental-clinic-agent" /></label>
-        <label>Monthly token quota <input name="monthly_token_quota" type="number" min="0" value="0" /></label>
+
+        <h4 class="edit-section">Admin API access</h4>
         <label>Admin token
           <span class="token-row">
             <input name="admin_token" type="password" />
@@ -471,24 +475,23 @@
           </span>
         </label>
         <p id="fetchTokenStatus" class="muted"></p>
+        <label class="creds-restart-label"><input type="checkbox" name="admin_via_ssh" />
+          Reach admin metrics via SSH loopback <span class="muted">(required for ADMIN_TUNNEL_ONLY instances)</span>
+        </label>
         <label>Admin loopback port <span class="muted">(the instance's 127.0.0.1 port on its VPS — used by the smoke suite and SSH-based metrics)</span>
           <input name="admin_local_port" type="number" min="1" max="65535" placeholder="8000" />
         </label>
-        <label class="creds-restart-label"><input type="checkbox" name="admin_via_ssh" />
-          Fetch admin metrics via SSH loopback <span class="muted">(required for ADMIN_TUNNEL_ONLY instances)</span>
-        </label>
+
+        <p class="muted">Token allowance &amp; pricing live on the <strong>Tokens</strong> tab; the managed-mode operator token on the <strong>Config</strong> tab — not here.</p>
 
         <details class="advanced-fields">
-          <summary>Advanced: "minutes saved" &amp; cost-estimate rates (optional)</summary>
-          <p class="muted">Leave blank to use sensible defaults (minutes) or hide the number entirely (cost — this tool can't know your real LLM pricing on its own).</p>
+          <summary>Advanced: "minutes saved" overrides (optional)</summary>
+          <p class="muted">Blank = sensible defaults. These only tune the dashboard's "minutes saved" estimate; they don't affect billing (that's the Tokens tab).</p>
           <div class="field-grid">
             <label>Minutes per booking <input name="minutes_per_booking" type="number" min="0" placeholder="6" /></label>
             <label>Minutes per reschedule <input name="minutes_per_reschedule" type="number" min="0" placeholder="4" /></label>
             <label>Minutes per cancellation <input name="minutes_per_cancellation" type="number" min="0" placeholder="3" /></label>
             <label>Minutes per callback <input name="minutes_per_callback" type="number" min="0" placeholder="5" /></label>
-            <label>$ per 1K input tokens <input name="cost_per_1k_input_tokens" type="number" min="0" step="0.0001" placeholder="0" /></label>
-            <label>$ per 1K cached tokens <input name="cost_per_1k_cached_tokens" type="number" min="0" step="0.0001" placeholder="0" /></label>
-            <label>$ per 1K output tokens <input name="cost_per_1k_output_tokens" type="number" min="0" step="0.0001" placeholder="0" /></label>
           </div>
         </details>
 

@@ -740,9 +740,11 @@ function openAddModal() {
   show("editModal");
 }
 
+// "minutes saved" overrides — still live (core.py computes minutes_saved from
+// these). The cost_per_1k_* rates that used to live here are retired: pricing
+// moved to the ledger (Tokens tab), so they're no longer shown or sent.
 const ADVANCED_NUMERIC_FIELDS = [
   "minutes_per_booking", "minutes_per_reschedule", "minutes_per_cancellation", "minutes_per_callback",
-  "cost_per_1k_input_tokens", "cost_per_1k_cached_tokens", "cost_per_1k_output_tokens",
 ];
 
 function openEditModal() {
@@ -757,7 +759,6 @@ function openEditModal() {
   form.base_url.value = c.base_url || "";
   form.ssh_target.value = c.ssh_target || "";
   form.remote_dir.value = c.remote_dir || "";
-  form.monthly_token_quota.value = c.monthly_token_quota || 0;
   form.admin_token.value = c.admin_token || "";
   // These two used to be missing from the form entirely, so ANY edit wiped
   // them from the saved record (PUT replaces the whole client) — a real
@@ -781,7 +782,6 @@ async function submitEditForm(e) {
     base_url: form.base_url.value.trim(),
     ssh_target: form.ssh_target.value.trim(),
     remote_dir: form.remote_dir.value.trim(),
-    monthly_token_quota: parseInt(form.monthly_token_quota.value || "0", 10),
     admin_token: form.admin_token.value.trim(),
     admin_local_port: form.admin_local_port.value.trim() === ""
       ? null : parseInt(form.admin_local_port.value, 10),
