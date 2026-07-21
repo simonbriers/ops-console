@@ -187,6 +187,33 @@ def remove_client(name: str) -> None:
     cfg.save_clients(remaining)
 
 
+class ReseedIn(BaseModel):
+    # Type-the-name guard: the browser must echo the exact client name back,
+    # so a full wipe can never fire from a stray click.
+    confirm: str = ""
+
+
+@router.post("/clients/{name}/reseed")
+def reseed_client(name: str, body: ReseedIn) -> dict[str, Any]:
+    """Nuke-and-reseed one client instance's database over SSH (seed --reset).
+    Guarded by a type-the-client-name confirmation because it wipes all data.
+    Mirrors the deploy/recreate endpoints: look the client up by name, hand
+    its ssh_target/remote_dir to core, surface the result verbatim."""
+    client = cfg.find_client(name)
+    if client is None:
+        raise HTTPException(status_code=404, detail=f"No client named {name!r}")
+    if (body.confirm or "").strip() != name:
+        raise HTTPException(
+            status_code=400,
+            detail="Confirmation text does not match the client name")
+    result = core.reseed_client(
+        client.get("ssh_target", ""), client.get("remote_dir", ""))
+    if not result.get("ok"):
+        raise HTTPException(status_code=502,
+                            detail=result.get("error") or "reseed failed")
+    return {"ok": True, "output": result.get("output", "")}
+
+
 @router.post("/clients/{name}/deploy")
 def deploy_client(name: str, body: DeployIn) -> dict[str, Any]:
     """The one mutating action in ops-console: pulls whatever's already on

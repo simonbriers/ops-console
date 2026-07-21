@@ -51,6 +51,12 @@ let credsDestRows = []; // [{key, value}], in display order
 // because a 60s poll tick happened to land at the wrong moment.
 let deployUiState = { mode: "idle", name: null, result: null }; // idle | confirm | deploying | result
 
+// Reseed UI state — same rationale as deployUiState: a destructive action
+// with a type-the-name confirmation that a background poll must never wipe
+// mid-type. `choice` is which reseed the operator picked at the confirm step
+// ("conversations" | "full").
+let reseedUiState = { mode: "idle", name: null, choice: null, result: null }; // idle | confirm | reseeding | result
+
 const $ = (id) => document.getElementById(id);
 
 // -- SVG gauges --------------------------------------------------------------
@@ -489,6 +495,7 @@ function applyDetail(r) {
   }
   $("detailVersion").innerHTML = versionHtml;
   renderDeployArea(r);
+  renderReseedArea(r);
 
   const u = r.usage;
   let usageHtml;
@@ -706,6 +713,108 @@ async function startDeploy(name) {
   refreshOneDetail();
 }
 
+// Nuke-and-reseed: wipes the instance's whole DB back to the starter demo
+// (seed --reset). Destructive, so it goes through the same type-the-name
+// confirmation the deploy area uses.
+function renderReseedArea(r) {
+  const el = $("reseedArea");
+  if (!el) return;
+  const v = r.version || {};
+  if (reseedUiState.name !== r.name) {
+    reseedUiState = { mode: "idle", name: r.name, choice: null, result: null };
+  }
+  // No ssh_target/remote_dir → the console can't reach the box to reseed;
+  // say so rather than offer a button that only 502s. (deploy area gates on
+  // the same v.ok signal.)
+  if (reseedUiState.mode === "idle" && !v.ok) {
+    el.innerHTML = `<p class="muted">Reseed needs SSH access (ssh_target + remote_dir) to this instance — not configured, so it's unavailable here.</p>`;
+    return;
+  }
+
+  // Don't rebuild the confirm form under a half-typed name on a poll tick.
+  if (reseedUiState.mode === "confirm") {
+    if (el.dataset.reseedRenderedFor === r.name && $("reseedConfirmInput")) return;
+  } else {
+    delete el.dataset.reseedRenderedFor;
+  }
+
+  if (reseedUiState.mode === "idle") {
+    el.innerHTML = `
+      <p class="muted">Wipes <strong>${escapeHtml(r.name)}</strong>'s entire database — all chats, bookings, clients and callbacks — and rebuilds it as a full demo (starter consultants/services <em>plus</em> generated demo clients, chats and bookings), then restarts its <code>app</code> container. Other clients on the VPS are never touched.</p>
+      <div class="modal-actions">
+        <button id="reseedStartBtn" type="button" class="danger">Wipe &amp; reseed to demo</button>
+      </div>`;
+    $("reseedStartBtn").addEventListener("click", () => {
+      reseedUiState.mode = "confirm";
+      applyDetail(r);
+    });
+  } else if (reseedUiState.mode === "confirm") {
+    el.dataset.reseedRenderedFor = r.name;
+    el.innerHTML = `
+      <div class="deploy-confirm">
+        <p class="infra-warning"><strong>Wipes the entire database</strong> — conversations, appointments, clients and callbacks — then rebuilds it as a full demo with freshly generated demo clients, chats and bookings. This cannot be undone.</p>
+        <label>Type "<strong>${escapeHtml(r.name)}</strong>" to confirm:
+          <input id="reseedConfirmInput" type="text" autocomplete="off" spellcheck="false" />
+        </label>
+        <div class="modal-actions">
+          <button id="reseedConfirmBtn" type="button" class="danger" disabled>Wipe &amp; reseed</button>
+          <button id="reseedCancelBtn" type="button">Cancel</button>
+        </div>
+      </div>`;
+    const input = $("reseedConfirmInput");
+    const confirmBtn = $("reseedConfirmBtn");
+    input.addEventListener("input", () => {
+      confirmBtn.disabled = input.value !== r.name;
+    });
+    confirmBtn.addEventListener("click", () => startReseed(r.name));
+    $("reseedCancelBtn").addEventListener("click", () => {
+      reseedUiState.mode = "idle";
+      applyDetail(r);
+    });
+  } else if (reseedUiState.mode === "reseeding") {
+    el.innerHTML = `<p class="muted">Wiping and reseeding, then restarting the container — don't close this.</p>`;
+  } else if (reseedUiState.mode === "result") {
+    const res = reseedUiState.result || {};
+    const cls = res.ok ? "ok" : "down";
+    const outputBlock = res.output
+      ? `<details class="deploy-output"><summary>Full output</summary><pre>${escapeHtml(res.output)}</pre></details>`
+      : "";
+    el.innerHTML = `
+      <div class="deploy-result ${cls}">
+        <p><strong>${res.ok ? "Wiped & reseeded to a full demo." : "Reseed failed."}</strong></p>
+        ${res.error ? `<p class="muted">${escapeHtml(res.error)}</p>` : ""}
+        ${outputBlock}
+        <button id="reseedDismissBtn" type="button">Dismiss</button>
+      </div>`;
+    $("reseedDismissBtn").addEventListener("click", () => {
+      reseedUiState.mode = "idle";
+      refreshOneDetail();
+    });
+  }
+}
+
+async function startReseed(name) {
+  reseedUiState.mode = "reseeding";
+  const current = latestResults.find((x) => x.name === name);
+  if (current) applyDetail(current);
+
+  let result;
+  try {
+    const resp = await fetch(`/api/clients/${encodeURIComponent(name)}/reseed`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: name }),
+    });
+    const data = await resp.json();
+    result = resp.ok ? data : { ok: false, error: data.detail || resp.statusText, output: "" };
+  } catch (e) {
+    result = { ok: false, error: String(e), output: "" };
+  }
+
+  reseedUiState.mode = "result";
+  reseedUiState.result = result;
+}
+
 async function refreshOneDetail() {
   const name = $("detailModal").dataset.name;
   if (!name) return;
@@ -740,11 +849,9 @@ function openAddModal() {
   show("editModal");
 }
 
-// "minutes saved" overrides — still live (core.py computes minutes_saved from
-// these). The cost_per_1k_* rates that used to live here are retired: pricing
-// moved to the ledger (Tokens tab), so they're no longer shown or sent.
 const ADVANCED_NUMERIC_FIELDS = [
   "minutes_per_booking", "minutes_per_reschedule", "minutes_per_cancellation", "minutes_per_callback",
+  "cost_per_1k_input_tokens", "cost_per_1k_cached_tokens", "cost_per_1k_output_tokens",
 ];
 
 function openEditModal() {
@@ -759,6 +866,7 @@ function openEditModal() {
   form.base_url.value = c.base_url || "";
   form.ssh_target.value = c.ssh_target || "";
   form.remote_dir.value = c.remote_dir || "";
+  form.monthly_token_quota.value = c.monthly_token_quota || 0;
   form.admin_token.value = c.admin_token || "";
   // These two used to be missing from the form entirely, so ANY edit wiped
   // them from the saved record (PUT replaces the whole client) — a real
@@ -782,6 +890,7 @@ async function submitEditForm(e) {
     base_url: form.base_url.value.trim(),
     ssh_target: form.ssh_target.value.trim(),
     remote_dir: form.remote_dir.value.trim(),
+    monthly_token_quota: parseInt(form.monthly_token_quota.value || "0", 10),
     admin_token: form.admin_token.value.trim(),
     admin_local_port: form.admin_local_port.value.trim() === ""
       ? null : parseInt(form.admin_local_port.value, 10),

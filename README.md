@@ -345,6 +345,37 @@ to "which container" — that would need fragile `ss -ltnp` /
 each client (`docker compose -f {remote_dir}/docker-compose.yml ps -q`) is
 exact and simple instead.
 
+## Reseed — wiping a demo instance back to a full demo
+
+The **Reseed database (destructive)** card at the bottom of a client's detail
+modal is the second mutating action (after Deploy). Shared demo boxes — e.g.
+`chat.my-ai-receptionist.com` — fill up with junk chats as people play with
+them; this button wipes that and puts back a clean, *populated* demo in one
+click, so you never SSH in for it.
+
+- **What it runs**: `core.reseed_client()` SSHes in and runs
+  `docker compose -p <project> exec -T app python -m backend.db.seed --demo`,
+  then restarts the `app` container (active chat sessions are in-memory in dev
+  mode, so the restart clears the stale live-tail too). It's the app's OWN
+  seed module — the single source of truth — not any console-side SQL.
+- **`--demo`, not `--reset`** (learned the hard way, 2026-07-21): `--reset`
+  wipes and reseeds only the *base* (consultants/services), leaving the demo
+  box looking empty. `--demo` wipes AND regenerates demo clients, chats,
+  appointments and callbacks — the full-looking showcase state the button is
+  actually for. The `_seed_demo()` variety only runs under `--demo`.
+- **Guarded** the same way Deploy is: a type-the-client-name confirmation in
+  the modal, and the route (`POST /api/clients/{name}/reseed`) re-checks it
+  server-side. Pins `-p <project>` per client for the same shared-VPS reason
+  `deploy_client` does (see the collision incident above).
+- **⚠ Caveat**: `--demo` injects *fake* clients/chats — perfect for a demo
+  box, wrong for a real paying client's instance (it would bury real data
+  under generated demo data after wiping it). The confirmation stops accidents,
+  but treat this as a demo-instance action. If a "clean wipe, no demo data"
+  variant is ever wanted for real clients, that's `--reset` behind a second
+  button.
+- Tested in `backend/tests/test_reseed.py` (command construction + the
+  type-name guard, `run_ssh` monkeypatched — no live SSH).
+
 ## Batch updates — the Updates tab (one run instead of N modals)
 
 Updating the fleet used to mean opening each client's detail modal, typing

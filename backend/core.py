@@ -1612,23 +1612,53 @@ def recreate_app(ssh_target: str, remote_dir: str) -> dict[str, Any]:
     `docker restart` silently keeps the old environment (bit us live,
     2026-07-19). `cd` into the checkout so compose finds the base +
     override files, and pin -p as always (see the project-name incident in
-    README).
-
-    `--force-recreate` is REQUIRED, not optional: a bare `up -d` only recreates
-    when the container SPEC changed (image/.env/compose). Managed-mode toggles
-    change `site.managed` in the /data VOLUME file, not the spec — so without
-    --force-recreate, `up -d` is a no-op and the app keeps its cached config,
-    which is exactly why disabling managed mode (and re-enabling once
-    OPERATOR_TOKEN already exists in .env, so .env doesn't change either) never
-    took effect (2026-07-21 acme rehearsal). Forcing the recreate reloads the
-    volume config every time, regardless of what changed."""
+    README)."""
     if not ssh_target or not remote_dir:
         return {"ok": False, "error": "no ssh_target/remote_dir configured"}
     shell_dir = _shell_remote_dir(remote_dir.rstrip("/"))
     project = _project_name(remote_dir)
-    cmd = (f"cd {shell_dir} && docker compose -p {project} up -d --force-recreate app 2>&1 "
+    cmd = (f"cd {shell_dir} && docker compose -p {project} up -d app 2>&1 "
            f"&& echo ===RECREATE_OK===")
     ok, out = run_ssh(ssh_target, cmd, timeout=120)
     if not ok or "===RECREATE_OK===" not in out:
         return {"ok": False, "error": out.strip()[-500:] or "ssh failed"}
     return {"ok": True, "error": None}
+
+
+def reseed_client(ssh_target: str, remote_dir: str) -> dict[str, Any]:
+    """Nuke-and-reseed a single client instance's database over SSH.
+
+    Runs `python -m backend.db.seed --demo` inside the running `app`
+    container — the app's OWN seed module (single source of truth). --demo
+    WIPES the entire database (conversations, appointments, clients, callbacks,
+    everything) and rebuilds it as a populated SHOWCASE: starter consultants/
+    services PLUS generated demo clients, conversations, appointments and
+    callbacks, so the instance looks alive again for the next demo. Intended
+    for shared demo boxes that accumulate junk as people play with them and
+    need a regular repopulating wipe. Destructive; the HTTP layer gates it
+    behind a type-the-name confirmation.
+
+    (Note: --demo, not --reset. --reset wipes to a BARE base with no demo
+    clients/chats — that left the demo box looking empty. --demo is the
+    "reset to a full-looking demo" the button is actually for.)
+
+    Restarts the `app` container afterwards because active chat sessions live
+    in memory (dev mode) and would otherwise keep showing a stale live-tail
+    after the persisted rows are gone.
+
+    Pins `-p {project}` on every compose call for the same reason recreate_app
+    does — see _project_name's docstring (a shared-VPS cross-client incident).
+    Never raises: SSH/exec failures come back in the "error" field."""
+    if not ssh_target or not remote_dir:
+        return {"ok": False, "error": "no ssh_target/remote_dir configured"}
+    shell_dir = _shell_remote_dir(remote_dir.rstrip("/"))
+    project = _project_name(shell_dir)
+    cmd = (f"cd {shell_dir} && "
+           f"docker compose -p {project} exec -T app "
+           f"python -m backend.db.seed --demo 2>&1 "
+           f"&& docker compose -p {project} restart app 2>&1 "
+           f"&& echo ===RESEED_OK===")
+    ok, out = run_ssh(ssh_target, cmd, timeout=DEPLOY_TIMEOUT)
+    if not ok or "===RESEED_OK===" not in out:
+        return {"ok": False, "error": out.strip()[-1000:] or "ssh failed"}
+    return {"ok": True, "error": None, "output": out.strip()[-2000:]}
