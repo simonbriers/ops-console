@@ -35,12 +35,26 @@ enable/disable managed mode (.env OPERATOR_TOKEN + in-container YAML flip
 `_admin_put_json` transports; `operator_token` lives on the client record
 (preserved across client edits; `/fetch-operator-token` recovery route).
 
+**Suite status: GREEN (153 tests), both repos committed+pushed end of day
+2.** Running the full suite surfaced two pre-existing problems, both fixed
+same day (dental CHANGELOG Sprint 37 follow-ups): (1) a REAL regression —
+the admin live-chat tray transcript rendered EMPTY on every instance since
+the Sprint 34 watch-period work (`len()` of a JSON *string* used as the
+message-count baseline); (2) test drift — the live config ships
+`demo_mode: true` since Sprint 34, so `test_api`/`test_tools` now pin
+`demo_mode: False` into their isolated copies (same pattern as the
+`disclose_prices` pin). The live-tray fix means the fleet deserves a code
+deploy, not just acme (the chat.*/primeconnectai.* freeze covers
+config/credential/plan writes, NOT code updates via the Updates tab).
+
 **Today's mission — rehearse Phases 6+7 end to end on acme:**
 
-0. Preconditions: run pytest in the dental repo (new test_managed_mode.py
-   must be green on Python 3.12); commit+push both repos if not already;
-   deploy the dental update to acme via the Updates tab (instances pull
-   from origin — unpushed commits can't deploy); reload the console.
+0. Preconditions: verify both repos pushed (`git status` — suite already
+   green end of day 2); deploy the dental update to acme via the Updates
+   tab (instances pull from origin), then fleet-wide when comfortable —
+   the live-tray transcript fix should reach the demo + PrimeConnect too;
+   reload the console (restart it so the new config_manager module +
+   Config tab load).
 1. Config tab, acme, BEFORE managed mode: Load (source should be "api"),
    check drift (expect some missing shipped defaults — new fields like
    site.managed won't be in acme's volume file until written), save a
@@ -54,7 +68,10 @@ enable/disable managed mode (.env OPERATOR_TOKEN + in-container YAML flip
    hard-reload so SW picks up v18; cfg-llm button gone; Reservas hides
    demo-mode/embed/max-chars and still saves; Email/SMS/Voz show the
    "managed by your provider" note, SMTP password field blank (redaction);
-   Seguridad still changes a password.
+   Seguridad still changes a password. While you're in there: send a chat
+   message to acme's widget and open the live-chat tray window — the
+   transcript must now SHOW the messages (this verifies the day-2
+   live-tray baseline fix live).
 4. Model switching via the console picker (rate-limit notes from the
    mistral source set should render); flip acme llm_model small↔large and
    back, verify a chat round-trip after each.
