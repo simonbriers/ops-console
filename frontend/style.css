@@ -417,3 +417,107 @@ strong.down { color: var(--down); }
 .cfg-drift table { width: 100%; margin: 0.4rem 0 0.8rem; }
 .cfg-drift h4 { margin: 0.7rem 0 0.3rem; }
 .cfg-drift .ok, .ok { color: #1e7145; }
+
+/* ================================================================= *
+ *  v3 — "Clean modern SaaS" restyle. A design-token layer + a pass  *
+ *  over the SHARED chrome/components, appended so it cascades over   *
+ *  the base rules above. Per-tab bespoke rules keep working; this    *
+ *  shifts the whole palette, type, spacing, and the app shell to a   *
+ *  left-sidebar layout. Change the look from these tokens.           *
+ * ================================================================= */
+:root{
+  --accent:#0d9488; --accent-ink:#0b7f74; --accent-bg:#e6f5f3;
+  --ink:#0f172a; --muted:#64748b; --faint:#94a3b8;
+  --panel:#ffffff; --panel-2:#fbfcfd;
+  --border:#e8eaee; --border-2:#eef0f3;
+  --bg:#f6f7f9;
+  --ok:#10b981; --warn:#f59e0b; --down:#ef4444; --unknown:#94a3b8;
+  --radius:12px; --radius-sm:8px;
+  --shadow-sm:0 1px 2px rgba(15,23,42,.04),0 1px 3px rgba(15,23,42,.06);
+  --shadow-md:0 2px 8px rgba(15,23,42,.06),0 8px 24px rgba(15,23,42,.05);
+  --sidebar-w:226px;
+}
+
+body{background:var(--bg);color:var(--ink);font-size:13.5px;
+  font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Inter,Helvetica,Arial,sans-serif;
+  -webkit-font-smoothing:antialiased;}
+
+/* ---- App shell: left sidebar + main column ---- */
+.app{display:grid;grid-template-columns:var(--sidebar-w) 1fr;min-height:100vh;}
+.side{background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;
+  padding:14px 12px;position:sticky;top:0;height:100vh;overflow:auto;}
+.brand{display:flex;align-items:center;gap:9px;padding:6px 8px 16px;}
+.brand .mark{width:26px;height:26px;border-radius:8px;display:grid;place-items:center;color:#fff;
+  background:linear-gradient(135deg,var(--accent),#14b8a6);box-shadow:var(--shadow-sm);flex:none;}
+.brand .name{font-weight:650;letter-spacing:-.01em;}
+.brand .env{margin-left:auto;font-size:10px;font-weight:600;color:var(--accent-ink);
+  background:var(--accent-bg);padding:2px 6px;border-radius:20px;}
+main{padding:0;min-width:0;}
+.topbar{position:sticky;top:0;z-index:5;display:flex;align-items:center;min-height:56px;padding:12px 26px;
+  background:rgba(246,247,249,.82);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);
+  justify-content:flex-start;}
+.topbar-title{font-size:17px;font-weight:660;letter-spacing:-.02em;}
+.topbar .header-actions{margin-left:auto;}
+.status-bar{color:var(--muted);font-size:12.5px;}
+.content{padding:22px 26px 52px;}
+
+/* ---- Sidebar nav (was a horizontal tab strip) ---- */
+.side .main-tabs{display:flex;flex-direction:column;gap:2px;margin:0;border-bottom:none;flex:1;overflow:visible;}
+.side .main-tabs .tab{display:flex;align-items:center;gap:9px;width:100%;text-align:left;border:none;
+  background:none;margin:0;padding:8px 11px;border-radius:var(--radius-sm);font-size:13.5px;font-weight:550;
+  color:var(--muted);opacity:1;border-bottom:none;box-shadow:none;}
+.side .main-tabs .tab:hover{background:var(--panel-2);color:var(--ink);}
+.side .main-tabs .tab.active{background:var(--accent-bg);color:var(--accent-ink);font-weight:650;border-bottom:none;}
+.side .main-tabs .tab.tab-right{margin-left:0;margin-top:auto;}
+
+/* ---- Buttons ---- */
+button{font-family:inherit;font-size:12.5px;font-weight:600;padding:8px 13px;border:1px solid var(--border);
+  background:var(--panel);color:var(--ink);border-radius:var(--radius-sm);box-shadow:var(--shadow-sm);}
+button:hover{background:var(--panel-2);}
+button.primary{background:var(--accent);border-color:var(--accent);color:#fff;}
+button.primary:hover{background:var(--accent-ink);}
+button.danger{color:var(--down);border-color:#f6cccc;background:var(--down-bg,#fdecec);}
+button.danger:hover{background:#fbdcdc;}
+
+/* ---- Inputs (light touch — component-specific inputs keep their own rules) ---- */
+input,select,textarea{font-family:inherit;}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px var(--accent-bg);}
+select{border:1px solid var(--border);border-radius:var(--radius-sm);background:var(--panel);
+  padding:6px 10px;font-size:13px;color:var(--ink);}
+form input{border-radius:var(--radius-sm);padding:7px 10px;}
+
+/* ---- Tables as cards ---- */
+table{border-collapse:separate;border-spacing:0;background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--radius);box-shadow:var(--shadow-sm);overflow:hidden;}
+th{background:var(--panel-2);font-size:11px;letter-spacing:.03em;text-transform:uppercase;color:var(--faint);
+  font-weight:600;padding:11px 16px;border-bottom:1px solid var(--border-2);}
+td{padding:12px 16px;border-bottom:1px solid var(--border-2);}
+tbody tr:hover{background:var(--panel-2);}
+tbody tr:last-child td{border-bottom:none;}
+
+/* ---- Panels / cards ---- */
+.impact-panel,.infra-panel{background:var(--panel);border:1px solid var(--border);
+  border-radius:var(--radius);box-shadow:var(--shadow-sm);}
+.impact-card .impact-value{color:var(--ink);letter-spacing:-.02em;}
+.impact-panel h3,.infra-sites h3,.creds-column h3,section h3{color:var(--faint);letter-spacing:.04em;}
+
+/* ---- Status pills / dots retuned ---- */
+.status-pill.ok{background:var(--accent-bg);color:var(--accent-ink);}
+.status-pill.warning{background:#fef4e2;color:#b45309;}
+.status-pill.down{background:var(--down-bg,#fdecec);color:var(--down);}
+.pill-managed{background:var(--accent-bg);color:var(--accent-ink);}
+
+/* ---- Modals ---- */
+.modal{background:rgba(15,23,42,.45);backdrop-filter:blur(2px);}
+.modal-box{border-radius:var(--radius);box-shadow:var(--shadow-md);border:1px solid var(--border);}
+
+/* ---- Filter/toolbar chips stay right-aligned but sit nicely ---- */
+.dash-toolbar,.upd-toolbar{align-items:center;}
+
+/* ---- Small screens: collapse the sidebar to the top ---- */
+@media (max-width:820px){
+  .app{grid-template-columns:1fr;}
+  .side{position:static;height:auto;flex-direction:row;flex-wrap:wrap;align-items:center;}
+  .side .main-tabs{flex-direction:row;flex-wrap:wrap;flex:1 1 100%;}
+  .side .main-tabs .tab.tab-right{margin-top:0;margin-left:auto;}
+}

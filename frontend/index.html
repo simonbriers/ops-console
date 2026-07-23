@@ -4,18 +4,17 @@
   <meta charset="utf-8" />
   <title>ops-console</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <link rel="stylesheet" href="/static/style.css?v=obv2-13" />
+  <link rel="stylesheet" href="/static/style.css?v=saas-1" />
 </head>
 <body>
-  <header>
-    <h1>ops-console</h1>
-    <div class="header-actions">
-      <span id="statusBar" class="status-bar">Loading…</span>
-    </div>
-  </header>
-
-  <main>
-    <nav id="mainTabs" class="main-tabs">
+  <div class="app">
+    <aside class="side">
+      <div class="brand">
+        <div class="mark"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
+        <span class="name">ops-console</span>
+        <span class="env">PROD</span>
+      </div>
+      <nav id="mainTabs" class="main-tabs">
       <button class="tab active" data-page="dashboard">Dashboard</button>
       <button class="tab" data-page="updates">Updates <span id="updTabBadge" class="upd-tab-badge hidden"></span></button>
       <button class="tab" data-page="tests">Tests</button>
@@ -29,7 +28,15 @@
       <button class="tab" data-page="host">Host / VPS</button>
       <button class="tab tab-right" id="settingsBtn">Settings</button>
     </nav>
-
+    </aside>
+    <main>
+      <header class="topbar">
+        <div class="topbar-title">Console</div>
+        <div class="header-actions">
+          <span id="statusBar" class="status-bar">Loading…</span>
+        </div>
+      </header>
+      <div class="content">
     <div id="page-host" class="page hidden">
     <section id="infraPanel" class="infra-panel">
       <div id="infraGauges" class="infra-gauges"></div>
@@ -406,7 +413,9 @@
         <span id="plApplyStatus" class="muted"></span>
       </section>
     </div><!-- /page-pipeline -->
-  </main>
+      </div><!-- /content -->
+    </main>
+  </div><!-- /app -->
 
   <!-- Detail modal -->
   <div id="detailModal" class="modal hidden">
