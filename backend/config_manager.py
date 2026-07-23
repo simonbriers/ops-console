@@ -406,6 +406,32 @@ def _flatten(d: Any, prefix: str = "") -> dict[str, Any]:
     return out
 
 
+def _missing_defaults(shipped_flat: dict[str, Any], live_flat: dict[str, Any]) -> list[str]:
+    """Shipped default keys genuinely absent from the live file.
+
+    A shipped SCALAR key whose path exists in the live file as a nested SUBTREE
+    is NOT missing — the live instance evolved that key into more detail. Real
+    case (2026-07-23, primary): the theme schema went from a flat
+    `custom_theme.--accent: '#059669'` to `--accent: {dark, light}`, so the
+    shipped flat leaf has no exact match live-side even though the live file is
+    strictly RICHER. Flagging those as "missing shipped defaults" is a false
+    positive that trains operators to ignore drift. We suppress it by checking
+    whether any live key starts with the shipped key + '.' (the subtree)."""
+    live_keys = set(live_flat)
+    out = []
+    for k in shipped_flat:
+        if k in live_keys:
+            continue
+        if any(lk.startswith(k + ".") for lk in live_keys):
+            continue  # scalar default expanded into a subtree live-side
+        if k.split(".", 1)[0] in _DRIFT_IGNORE_TOP:
+            continue
+        if k in _DRIFT_IGNORE_PATHS:
+            continue
+        out.append(k)
+    return sorted(out)
+
+
 def drift_check(client: dict[str, Any]) -> dict[str, Any]:
     """Three-way diff: live volume file vs shipped defaults vs the console's
     last-written state.
@@ -428,10 +454,7 @@ def drift_check(client: dict[str, Any]) -> dict[str, Any]:
 
     live_flat = _flatten(live["parsed"])
     shipped_flat = _flatten(shipped["parsed"])
-    missing = sorted(
-        k for k in shipped_flat
-        if k not in live_flat and k.split(".", 1)[0] not in _DRIFT_IGNORE_TOP
-        and k not in _DRIFT_IGNORE_PATHS)
+    missing = _missing_defaults(shipped_flat, live_flat)
 
     written = get_written(client.get("name", ""))
     out_of_band = []
