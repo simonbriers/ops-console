@@ -1,0 +1,338 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ops-console — Fleet (redesign mockup)</title>
+<style>
+  /* ============================================================= *
+   *  DESIGN TOKENS — the whole look comes from these variables.   *
+   *  This is the "token layer" the real app would adopt first.    *
+   * ============================================================= */
+  :root{
+    --bg:#f6f7f9; --panel:#ffffff; --panel-2:#fbfcfd;
+    --ink:#0f172a; --muted:#64748b; --faint:#94a3b8;
+    --border:#e8eaee; --border-2:#eef0f3;
+    --accent:#0d9488; --accent-ink:#0b7f74; --accent-bg:#e6f5f3;
+    --ok:#10b981; --ok-bg:#e7f7f0;
+    --warn:#f59e0b; --warn-bg:#fef4e2;
+    --danger:#ef4444; --danger-bg:#fdecec;
+    --info:#6366f1;
+    --radius:12px; --radius-sm:8px; --radius-xs:6px;
+    --shadow-sm:0 1px 2px rgba(15,23,42,.04),0 1px 3px rgba(15,23,42,.06);
+    --shadow-md:0 2px 8px rgba(15,23,42,.06),0 8px 24px rgba(15,23,42,.05);
+    --sidebar-w:236px;
+    --font:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Helvetica,Arial,sans-serif;
+    --mono:'SF Mono',ui-monospace,'JetBrains Mono',Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{background:var(--bg);color:var(--ink);font-family:var(--font);font-size:13.5px;line-height:1.45;-webkit-font-smoothing:antialiased}
+  .app{display:grid;grid-template-columns:var(--sidebar-w) 1fr;height:100vh;overflow:hidden}
+
+  /* ---------- SIDEBAR ---------- */
+  .side{background:var(--panel);border-right:1px solid var(--border);display:flex;flex-direction:column;padding:14px 12px}
+  .brand{display:flex;align-items:center;gap:9px;padding:6px 8px 14px}
+  .brand .mark{width:26px;height:26px;border-radius:8px;background:linear-gradient(135deg,var(--accent),#14b8a6);display:grid;place-items:center;color:#fff;box-shadow:var(--shadow-sm)}
+  .brand .name{font-weight:650;letter-spacing:-.01em}
+  .brand .env{margin-left:auto;font-size:10px;font-weight:600;color:var(--accent-ink);background:var(--accent-bg);padding:2px 6px;border-radius:20px}
+  .navgroup-label{font-size:10.5px;font-weight:600;letter-spacing:.05em;text-transform:uppercase;color:var(--faint);padding:14px 10px 5px}
+  .nav a{display:flex;align-items:center;gap:10px;padding:7px 10px;border-radius:var(--radius-sm);color:var(--muted);text-decoration:none;font-weight:500;position:relative}
+  .nav a svg{width:16px;height:16px;stroke:currentColor;flex:none}
+  .nav a .count{margin-left:auto;font-size:11px;font-weight:600;color:var(--muted);background:var(--border-2);padding:1px 7px;border-radius:20px}
+  .nav a:hover{background:var(--panel-2);color:var(--ink)}
+  .nav a.active{background:var(--accent-bg);color:var(--accent-ink);font-weight:600}
+  .nav a.active .count{background:#fff;color:var(--accent-ink)}
+  .nav a .dot{margin-left:auto;width:7px;height:7px;border-radius:50%}
+  .side-foot{margin-top:auto;border-top:1px solid var(--border);padding-top:10px;display:flex;align-items:center;gap:9px}
+  .avatar{width:28px;height:28px;border-radius:50%;background:#dbe4ea;display:grid;place-items:center;font-weight:600;font-size:11px;color:#475569}
+  .side-foot .who{font-size:12px;font-weight:600}
+  .side-foot .who small{display:block;color:var(--faint);font-weight:500}
+  .icon-btn{margin-left:auto;width:28px;height:28px;border-radius:8px;border:1px solid var(--border);background:var(--panel);display:grid;place-items:center;color:var(--muted);cursor:pointer}
+
+  /* ---------- MAIN ---------- */
+  .main{overflow:auto}
+  .topbar{position:sticky;top:0;z-index:5;background:rgba(246,247,249,.85);backdrop-filter:blur(8px);border-bottom:1px solid var(--border);padding:16px 26px;display:flex;align-items:center;gap:18px}
+  .topbar h1{font-size:19px;margin:0;letter-spacing:-.02em;font-weight:660}
+  .topbar .sub{color:var(--muted);font-size:12.5px;margin-top:2px}
+  .topbar .sub b{color:var(--ink);font-weight:600}
+  .topbar .spacer{flex:1}
+  .search{display:flex;align-items:center;gap:8px;background:var(--panel);border:1px solid var(--border);border-radius:var(--radius-sm);padding:7px 11px;color:var(--faint);min-width:230px;box-shadow:var(--shadow-sm)}
+  .search svg{width:15px;height:15px;stroke:currentColor}
+  .search .kbd{margin-left:auto;font-size:10.5px;font-family:var(--mono);color:var(--faint);border:1px solid var(--border);border-radius:5px;padding:1px 5px}
+  .btn{border:1px solid var(--border);background:var(--panel);color:var(--ink);font-family:inherit;font-size:12.5px;font-weight:600;padding:8px 13px;border-radius:var(--radius-sm);cursor:pointer;display:inline-flex;align-items:center;gap:7px;box-shadow:var(--shadow-sm)}
+  .btn svg{width:14px;height:14px;stroke:currentColor}
+  .btn:hover{background:var(--panel-2)}
+  .btn.primary{background:var(--accent);border-color:var(--accent);color:#fff}
+  .btn.primary:hover{background:var(--accent-ink)}
+  .content{padding:22px 26px 48px}
+
+  /* ---------- KPI CARDS ---------- */
+  .kpis{display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-bottom:18px}
+  .kpi{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);padding:14px 15px;box-shadow:var(--shadow-sm);position:relative;overflow:hidden}
+  .kpi .label{font-size:11.5px;color:var(--muted);font-weight:550;display:flex;align-items:center;gap:6px}
+  .kpi .label .d{width:8px;height:8px;border-radius:50%}
+  .kpi .val{font-size:26px;font-weight:680;letter-spacing:-.02em;margin-top:7px;font-variant-numeric:tabular-nums}
+  .kpi .val small{font-size:13px;color:var(--muted);font-weight:600}
+  .kpi .delta{font-size:11px;font-weight:600;margin-top:3px}
+  .kpi .delta.up{color:var(--ok)} .kpi .delta.down{color:var(--danger)} .kpi .delta.flat{color:var(--faint)}
+  .kpi .spark{position:absolute;right:12px;bottom:12px;opacity:.9}
+
+  .grid2{display:grid;grid-template-columns:1.55fr 1fr;gap:18px;margin-bottom:18px}
+  .card{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-sm)}
+  .card-head{display:flex;align-items:center;gap:10px;padding:14px 16px;border-bottom:1px solid var(--border-2)}
+  .card-head h3{margin:0;font-size:14px;font-weight:640;letter-spacing:-.01em}
+  .card-head .pill{font-size:11px;font-weight:600;color:var(--danger);background:var(--danger-bg);padding:2px 8px;border-radius:20px}
+  .card-head .link{margin-left:auto;color:var(--accent-ink);font-size:12px;font-weight:600;text-decoration:none;cursor:pointer}
+
+  /* ---------- ATTENTION QUEUE ---------- */
+  .attn{padding:6px 8px}
+  .attn-row{display:flex;align-items:center;gap:11px;padding:9px 10px;border-radius:var(--radius-sm)}
+  .attn-row:hover{background:var(--panel-2)}
+  .attn-row .sev{width:8px;height:8px;border-radius:50%;flex:none}
+  .attn-row .txt{font-size:12.5px}
+  .attn-row .txt b{font-weight:640}
+  .attn-row .txt small{color:var(--muted);display:block;margin-top:1px}
+  .attn-row .act{margin-left:auto;font-size:11.5px;font-weight:600;color:var(--accent-ink);border:1px solid var(--border);background:var(--panel);border-radius:6px;padding:4px 9px;cursor:pointer}
+  .attn-row .act:hover{background:var(--accent-bg);border-color:var(--accent-bg)}
+
+  /* ---------- FILTER CHIPS ---------- */
+  .filters{display:flex;align-items:center;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+  .chip{font-size:12px;font-weight:600;color:var(--muted);background:var(--panel);border:1px solid var(--border);padding:6px 12px;border-radius:20px;cursor:pointer;display:inline-flex;gap:7px;align-items:center;box-shadow:var(--shadow-sm)}
+  .chip .n{font-size:10.5px;background:var(--border-2);color:var(--muted);border-radius:20px;padding:0 6px}
+  .chip.active{background:var(--ink);border-color:var(--ink);color:#fff}
+  .chip.active .n{background:rgba(255,255,255,.2);color:#fff}
+  .filters .right{margin-left:auto;color:var(--faint);font-size:12px}
+
+  /* ---------- FLEET TABLE ---------- */
+  .tablewrap{background:var(--panel);border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow-sm);overflow:hidden}
+  table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}
+  thead th{text-align:left;font-size:11px;font-weight:600;letter-spacing:.03em;text-transform:uppercase;color:var(--faint);padding:11px 16px;border-bottom:1px solid var(--border-2);background:var(--panel-2)}
+  tbody td{padding:12px 16px;border-bottom:1px solid var(--border-2);font-size:13px}
+  tbody tr:last-child td{border-bottom:none}
+  tbody tr:hover{background:var(--panel-2)}
+  tr.warnrow{background:#fffdf7} tr.warnrow:hover{background:#fef9ee}
+  tr.downrow{background:#fff9f9} tr.downrow:hover{background:#fdf1f1}
+  .hcell{display:flex;align-items:center;gap:9px}
+  .hdot{width:9px;height:9px;border-radius:50%;flex:none}
+  .hscore{font-size:11px;font-weight:600;color:var(--muted);font-family:var(--mono)}
+  .cname{font-weight:620;letter-spacing:-.01em}
+  .cname small{display:block;color:var(--faint);font-weight:500;font-size:11px}
+  .badge{font-size:11px;font-weight:600;padding:2px 8px;border-radius:20px;display:inline-block}
+  .badge.ok{color:var(--accent-ink);background:var(--accent-bg)}
+  .badge.warn{color:#b45309;background:var(--warn-bg)}
+  .badge.behind{color:#b45309;background:var(--warn-bg)}
+  .usebar{height:6px;border-radius:20px;background:var(--border-2);overflow:hidden;width:96px}
+  .usebar span{display:block;height:100%;border-radius:20px}
+  .usetext{font-size:11px;color:var(--muted);margin-top:3px}
+  .muted{color:var(--muted)} .mono{font-family:var(--mono);font-size:12px}
+  .rowact{display:flex;gap:6px;justify-content:flex-end}
+  .rowact button{font-size:11.5px;font-weight:600;border:1px solid var(--border);background:var(--panel);border-radius:6px;padding:5px 10px;cursor:pointer;color:var(--ink)}
+  .rowact button.go{color:var(--accent-ink);border-color:var(--accent-bg);background:var(--accent-bg)}
+  .rowact button:hover{background:var(--panel-2)}
+  .rowact button.go:hover{filter:brightness(.97)}
+  .note{margin:22px 2px 0;color:var(--faint);font-size:11.5px;text-align:center}
+</style>
+</head>
+<body>
+<div class="app">
+  <!-- ============ SIDEBAR ============ -->
+  <aside class="side">
+    <div class="brand">
+      <div class="mark">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg>
+      </div>
+      <span class="name">ops-console</span>
+      <span class="env">PROD</span>
+    </div>
+
+    <div class="navgroup-label">Operate</div>
+    <nav class="nav">
+      <a class="active" href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg> Fleet <span class="dot" style="background:var(--warn)"></span></a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><path d="M12 3v18M3 8l9-5 9 5M3 8v8l9 5 9-5V8"/></svg> Lifecycle <span class="count">2</span></a>
+    </nav>
+
+    <div class="navgroup-label">Configure</div>
+    <nav class="nav">
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><path d="M7 10V7a5 5 0 0 1 10 0v3"/><rect x="4" y="10" width="16" height="10" rx="2"/></svg> Credentials</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><path d="M4 19V5m0 14h16M8 15l3-4 3 3 4-6"/></svg> Billing <span class="dot" style="background:var(--danger)"></span></a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><circle cx="12" cy="12" r="3"/><path d="M19 12a7 7 0 0 0-.1-1.2l2-1.6-2-3.4-2.4 1a7 7 0 0 0-2-1.2l-.4-2.6H9.9l-.4 2.6a7 7 0 0 0-2 1.2l-2.4-1-2 3.4 2 1.6A7 7 0 0 0 5 12"/></svg> Configuration</a>
+      <a href="#"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg> Infrastructure</a>
+    </nav>
+
+    <div class="side-foot">
+      <div class="avatar">SB</div>
+      <div class="who">Simon<small>operator</small></div>
+      <button class="icon-btn" title="Settings"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9"><circle cx="12" cy="12" r="3"/><path d="M12 3v2m0 14v2M3 12h2m14 0h2"/></svg></button>
+    </div>
+  </aside>
+
+  <!-- ============ MAIN ============ -->
+  <main class="main">
+    <header class="topbar">
+      <div>
+        <h1>Fleet</h1>
+        <div class="sub"><b>42</b> clients · <b style="color:var(--ok)">40</b> up · <b style="color:var(--warn)">1</b> warning · <b style="color:var(--danger)">1</b> down</div>
+      </div>
+      <div class="spacer"></div>
+      <div class="search"><svg viewBox="0 0 24 24" fill="none" stroke-width="1.9"><circle cx="11" cy="11" r="7"/><path d="m20 20-3-3"/></svg> Search clients…<span class="kbd">⌘K</span></div>
+      <button class="btn"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M4 12h16M12 4v16"/></svg> Provision</button>
+      <button class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke-width="2"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14"/></svg> Deploy 6</button>
+    </header>
+
+    <div class="content">
+      <!-- KPIs -->
+      <section class="kpis">
+        <div class="kpi">
+          <div class="label"><span class="d" style="background:var(--ok)"></span>Up</div>
+          <div class="val">40<small> / 42</small></div>
+          <div class="delta up">▲ 2 recovered</div>
+        </div>
+        <div class="kpi">
+          <div class="label"><span class="d" style="background:var(--warn)"></span>Pending updates</div>
+          <div class="val">6</div>
+          <div class="delta flat">behind origin/master</div>
+        </div>
+        <div class="kpi">
+          <div class="label"><span class="d" style="background:var(--danger)"></span>Over quota</div>
+          <div class="val">1</div>
+          <div class="delta down">▲ 1 this week</div>
+        </div>
+        <div class="kpi">
+          <div class="label"><span class="d" style="background:var(--danger)"></span>Tests failing</div>
+          <div class="val">2</div>
+          <div class="delta down">on 2 clients</div>
+        </div>
+        <div class="kpi">
+          <div class="label">Est. cost (mo)</div>
+          <div class="val">€214</div>
+          <div class="delta up">▼ 8% vs last mo</div>
+          <svg class="spark" width="60" height="22" viewBox="0 0 60 22" fill="none"><path d="M0 16 L10 12 L20 14 L30 8 L40 10 L50 5 L60 7" stroke="var(--accent)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+        <div class="kpi">
+          <div class="label">Minutes saved (mo)</div>
+          <div class="val">18.4k</div>
+          <div class="delta up">▲ 12%</div>
+          <svg class="spark" width="60" height="22" viewBox="0 0 60 22" fill="none"><path d="M0 18 L10 16 L20 12 L30 13 L40 8 L50 6 L60 3" stroke="var(--ok)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </div>
+      </section>
+
+      <!-- Attention queue + snapshot -->
+      <section class="grid2">
+        <div class="card">
+          <div class="card-head"><h3>Needs attention</h3><span class="pill">4 open</span><a class="link">Clear all</a></div>
+          <div class="attn">
+            <div class="attn-row"><span class="sev" style="background:var(--danger)"></span><div class="txt"><b>Clínica Valor</b> is down — health check failing 6m<small>chat.my-ai-receptionist.com · last up 18:42</small></div><button class="act">Restart</button></div>
+            <div class="attn-row"><span class="sev" style="background:var(--danger)"></span><div class="txt"><b>Bright Smile Dental</b> over token quota — billable overage<small>112% of monthly allowance</small></div><button class="act">View plan</button></div>
+            <div class="attn-row"><span class="sev" style="background:var(--warn)"></span><div class="txt"><b>PrimeConnect AI</b> deploy failed at build stage<small>commit a3f1e9 · "no space left on device"</small></div><button class="act">Retry</button></div>
+            <div class="attn-row"><span class="sev" style="background:var(--warn)"></span><div class="txt"><b>Northgate Clinic</b> backup timer inactive 3d<small>warn-level · nightly backups not running</small></div><button class="act">Fix</button></div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-head"><h3>Fleet health</h3><a class="link">Details</a></div>
+          <div style="padding:18px 16px;display:flex;gap:22px;align-items:center">
+            <svg width="118" height="118" viewBox="0 0 118 118">
+              <circle cx="59" cy="59" r="50" fill="none" stroke="var(--border-2)" stroke-width="12"/>
+              <circle cx="59" cy="59" r="50" fill="none" stroke="var(--ok)" stroke-width="12" stroke-linecap="round" stroke-dasharray="314" stroke-dashoffset="30" transform="rotate(-90 59 59)"/>
+              <text x="59" y="56" text-anchor="middle" font-size="26" font-weight="700" fill="var(--ink)">95</text>
+              <text x="59" y="74" text-anchor="middle" font-size="10.5" fill="var(--muted)">health score</text>
+            </svg>
+            <div style="flex:1;display:flex;flex-direction:column;gap:9px">
+              <div style="display:flex;align-items:center;gap:9px"><span class="hdot" style="background:var(--ok)"></span><span style="font-weight:600">40 healthy</span></div>
+              <div style="display:flex;align-items:center;gap:9px"><span class="hdot" style="background:var(--warn)"></span><span style="font-weight:600">1 warning</span> <span class="muted">low uptime</span></div>
+              <div style="display:flex;align-items:center;gap:9px"><span class="hdot" style="background:var(--danger)"></span><span style="font-weight:600">1 down</span></div>
+              <div style="height:1px;background:var(--border-2);margin:3px 0"></div>
+              <div class="muted" style="font-size:12px">Avg uptime 7d · <b style="color:var(--ink)">99.4%</b></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Filters -->
+      <div class="filters">
+        <span class="chip active">All <span class="n">42</span></span>
+        <span class="chip">Down <span class="n">1</span></span>
+        <span class="chip">Needs updates <span class="n">6</span></span>
+        <span class="chip">Over quota <span class="n">1</span></span>
+        <span class="chip">Tests failing <span class="n">2</span></span>
+        <span class="chip">＋ Saved view</span>
+        <span class="right">Sorted by health · worst first</span>
+      </div>
+
+      <!-- Fleet table -->
+      <div class="tablewrap">
+        <table>
+          <thead><tr>
+            <th style="width:150px">Health</th><th>Client</th><th>Version</th><th>Usage</th><th>Uptime 7d</th><th>Cost (mo)</th><th>Saved</th><th style="text-align:right">Actions</th>
+          </tr></thead>
+          <tbody>
+            <tr class="downrow">
+              <td><div class="hcell"><span class="hdot" style="background:var(--danger)"></span><span style="font-weight:600">Down</span><span class="hscore">·12</span></div></td>
+              <td><div class="cname">Clínica Valor<small>valor.my-ai-receptionist.com</small></div></td>
+              <td><span class="badge behind">2 behind</span></td>
+              <td><span class="muted mono">—</span></td>
+              <td><span style="color:var(--danger);font-weight:600">— </span><span class="muted">unreachable</span></td>
+              <td class="mono">€38</td>
+              <td class="muted mono">1.9k</td>
+              <td><div class="rowact"><button class="go">Restart</button><button>Logs</button></div></td>
+            </tr>
+            <tr class="warnrow">
+              <td><div class="hcell"><span class="hdot" style="background:var(--warn)"></span><span style="font-weight:600">Warning</span><span class="hscore">·71</span></div></td>
+              <td><div class="cname">Bright Smile Dental<small>brightsmile.my-ai-receptionist.com</small></div></td>
+              <td><span class="badge ok">current</span></td>
+              <td><div class="usebar"><span style="width:112%;background:var(--danger)"></span></div><div class="usetext" style="color:var(--danger)">112% · over quota</div></td>
+              <td>96.2%</td>
+              <td class="mono">€41</td>
+              <td class="muted mono">2.6k</td>
+              <td><div class="rowact"><button class="go">Plan</button><button>Test</button></div></td>
+            </tr>
+            <tr>
+              <td><div class="hcell"><span class="hdot" style="background:var(--ok)"></span><span style="font-weight:600">Healthy</span><span class="hscore">·98</span></div></td>
+              <td><div class="cname">PrimeConnect AI<small>chat.my-ai-receptionist.com</small></div></td>
+              <td><span class="badge behind">6 behind</span></td>
+              <td><div class="usebar"><span style="width:64%;background:var(--accent)"></span></div><div class="usetext">64% · 1.6M tok</div></td>
+              <td>99.9%</td>
+              <td class="mono">€22</td>
+              <td class="muted mono">3.1k</td>
+              <td><div class="rowact"><button class="go">Deploy</button><button>Test</button></div></td>
+            </tr>
+            <tr>
+              <td><div class="hcell"><span class="hdot" style="background:var(--ok)"></span><span style="font-weight:600">Healthy</span><span class="hscore">·99</span></div></td>
+              <td><div class="cname">Northgate Clinic<small>northgate.my-ai-receptionist.com</small></div></td>
+              <td><span class="badge ok">current</span></td>
+              <td><div class="usebar"><span style="width:38%;background:var(--accent)"></span></div><div class="usetext">38% · 890k tok</div></td>
+              <td>100%</td>
+              <td class="mono">€17</td>
+              <td class="muted mono">1.4k</td>
+              <td><div class="rowact"><button class="go">Deploy</button><button>Test</button></div></td>
+            </tr>
+            <tr>
+              <td><div class="hcell"><span class="hdot" style="background:var(--ok)"></span><span style="font-weight:600">Healthy</span><span class="hscore">·97</span></div></td>
+              <td><div class="cname">Lakeside Orthodontics<small>lakeside.my-ai-receptionist.com</small></div></td>
+              <td><span class="badge behind">2 behind</span></td>
+              <td><div class="usebar"><span style="width:52%;background:var(--accent)"></span></div><div class="usetext">52% · 1.2M tok</div></td>
+              <td>99.7%</td>
+              <td class="mono">€26</td>
+              <td class="muted mono">2.2k</td>
+              <td><div class="rowact"><button class="go">Deploy</button><button>Test</button></div></td>
+            </tr>
+            <tr>
+              <td><div class="hcell"><span class="hdot" style="background:var(--ok)"></span><span style="font-weight:600">Healthy</span><span class="hscore">·96</span></div></td>
+              <td><div class="cname">Meridian Dental Group<small>meridian.my-ai-receptionist.com</small></div></td>
+              <td><span class="badge ok">current</span></td>
+              <td><div class="usebar"><span style="width:71%;background:var(--accent)"></span></div><div class="usetext">71% · 1.8M tok</div></td>
+              <td>99.5%</td>
+              <td class="mono">€33</td>
+              <td class="muted mono">2.9k</td>
+              <td><div class="rowact"><button class="go">Deploy</button><button>Test</button></div></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <p class="note">Mockup · redesigned Fleet view (Clean modern SaaS direction) · sample data</p>
+    </div>
+  </main>
+</div>
+</body>
+</html>

@@ -235,6 +235,7 @@ function renderTable() {
   const tbody = $("clientTableBody");
   if (latestResults.length === 0) {
     tbody.innerHTML = `<tr><td colspan="8" class="empty">No clients configured yet — click "Add client" to start monitoring one.</td></tr>`;
+    renderFleet();
     renderUpdatesPage();
     renderTestsPage();
     return;
@@ -257,6 +258,7 @@ function renderTable() {
   [...tbody.querySelectorAll("tr[data-name]")].forEach((row) => {
     row.addEventListener("click", () => openDetail(row.dataset.name));
   });
+  renderFleet();
   renderImpactPanel();
   renderUpdatesPage();
   renderTestsPage();
@@ -319,6 +321,87 @@ function renderImpactPanel() {
       </div>`);
   }
   el.innerHTML = cards.join("");
+}
+
+// Fleet landing: KPI row + attention queue + health ring, all derived from the
+// per-client status data already fetched into latestResults (no backend call).
+function _kpi(label, dotColor, value, sub, subClass) {
+  const dot = dotColor ? `<span class="d" style="background:${dotColor}"></span>` : "";
+  const delta = sub ? `<div class="delta ${subClass || "flat"}">${sub}</div>` : "";
+  return `<div class="kpi"><div class="label">${dot}${label}</div><div class="val">${value}</div>${delta}</div>`;
+}
+
+function renderFleet() {
+  const kpis = $("fleetKpis"), attn = $("fleetAttention"), health = $("fleetHealth"), pill = $("attnPill");
+  if (!kpis) return;
+  const rs = latestResults;
+  if (!rs.length) {
+    kpis.innerHTML = "";
+    if (attn) attn.innerHTML = `<div class="attn-row"><span class="muted" style="padding:6px">No clients yet.</span></div>`;
+    if (health) health.innerHTML = "";
+    if (pill) pill.textContent = "";
+    return;
+  }
+  const total = rs.length;
+  const down = rs.filter((r) => r.status === "down").length;
+  const warn = rs.filter((r) => r.status === "warning").length;
+  const ok = total - down - warn;
+  const behind = rs.filter((r) => r.version && r.version.ok && (r.version.behind || 0) > 0);
+  const over = rs.filter((r) => r.over_quota);
+  let cost = 0, costOn = false, saved = 0, savedOn = false;
+  rs.forEach((r) => {
+    if (r.cost && r.cost.ok && r.cost.configured) { costOn = true; cost += r.cost.estimated_eur || 0; }
+    if (r.interactions && r.interactions.ok) { savedOn = true; saved += r.interactions.minutes_saved || 0; }
+  });
+
+  kpis.innerHTML = [
+    _kpi("Up", "var(--ok)", `${total - down}<small> / ${total}</small>`, down ? `${down} down` : "all reachable", down ? "down" : "up"),
+    _kpi("Needs update", "var(--warn)", behind.length, behind.length ? "behind master" : "all current", "flat"),
+    _kpi("Over quota", "var(--down)", over.length, over.length ? "billable overage" : "within plan", over.length ? "down" : "flat"),
+    _kpi("Warnings", "var(--warn)", warn, warn ? "degraded" : "none", "flat"),
+    _kpi("Est. cost (mo)", "", costOn ? `€${cost.toFixed(0)}` : "—", "from plans", "flat"),
+    _kpi("Saved (mo)", "", savedOn ? fmtHM(saved) : "—", "receptionist time", "up"),
+  ].join("");
+
+  // attention queue — worst first
+  const items = [];
+  rs.filter((r) => r.status === "down").forEach((r) =>
+    items.push({ sev: "var(--down)", name: r.name, txt: "is down", sub: (r.health && r.health.error) || "health check failing" }));
+  over.forEach((r) => items.push({ sev: "var(--down)", name: r.name, txt: "over token quota", sub: "billable overage" }));
+  rs.filter((r) => r.status === "warning").forEach((r) =>
+    items.push({ sev: "var(--warn)", name: r.name, txt: "degraded", sub: "low uptime or failing checks" }));
+  behind.forEach((r) => items.push({ sev: "var(--warn)", name: r.name, txt: `${r.version.behind} commit(s) behind`, sub: "pending deploy" }));
+  if (pill) pill.textContent = `${items.length} open`;
+  const shown = items.slice(0, 6);
+  attn.innerHTML = (shown.length
+    ? shown.map((it) =>
+        `<div class="attn-row" data-name="${escapeHtml(it.name)}"><span class="sev" style="background:${it.sev}"></span>` +
+        `<div class="txt"><b>${escapeHtml(it.name)}</b> ${escapeHtml(it.txt)}<small>${escapeHtml(it.sub)}</small></div>` +
+        `<button class="act">View</button></div>`).join("") +
+      (items.length > 6 ? `<div class="muted" style="padding:6px 10px">+${items.length - 6} more</div>` : "")
+    : `<div class="attn-row"><span class="sev" style="background:var(--ok)"></span><div class="txt"><b>All clear</b><small>nothing needs attention right now</small></div></div>`);
+  attn.querySelectorAll(".attn-row[data-name]").forEach((el) =>
+    el.addEventListener("click", () => openDetail(el.dataset.name)));
+
+  // health ring — weighted: down=0, warning=50, ok=100
+  const score = Math.round(rs.reduce((a, r) => a + (r.status === "down" ? 0 : r.status === "warning" ? 50 : 100), 0) / total);
+  const circ = 314, off = circ - circ * score / 100;
+  const col = score >= 90 ? "var(--ok)" : score >= 70 ? "var(--warn)" : "var(--down)";
+  health.innerHTML =
+    `<div style="display:flex;gap:20px;align-items:center">
+      <svg width="112" height="112" viewBox="0 0 118 118">
+        <circle cx="59" cy="59" r="50" fill="none" stroke="var(--border-2)" stroke-width="12"/>
+        <circle cx="59" cy="59" r="50" fill="none" stroke="${col}" stroke-width="12" stroke-linecap="round"
+          stroke-dasharray="${circ}" stroke-dashoffset="${off}" transform="rotate(-90 59 59)"/>
+        <text x="59" y="56" text-anchor="middle" font-size="24" font-weight="700" fill="var(--ink)">${score}</text>
+        <text x="59" y="74" text-anchor="middle" font-size="10" fill="var(--muted)">health</text>
+      </svg>
+      <div style="flex:1;display:flex;flex-direction:column;gap:7px">
+        <div><span class="hlegdot" style="background:var(--ok)"></span> <b>${ok}</b> healthy</div>
+        <div><span class="hlegdot" style="background:var(--warn)"></span> <b>${warn}</b> warning</div>
+        <div><span class="hlegdot" style="background:var(--down)"></span> <b>${down}</b> down</div>
+      </div>
+    </div>`;
 }
 
 function updateStatusBar() {
