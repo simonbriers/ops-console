@@ -23,7 +23,7 @@ let editingName = null; // null => add mode
 // earlier version of this list wrongly assumed there was, which just
 // produced a permanently-empty ghost row in the table below.
 const KNOWN_ENV_KEYS = [
-  "OLLAMALOCAL_API_KEY", "NVIDIA_API_KEY", "OPENROUTER_API_KEY",
+  "OLLAMALOCAL_API_KEY", "NVIDIA_API_KEY", "OPENROUTER_API_KEY", "ZENMUX_API_KEY",
   "MISTRAL_API_KEY", "ADMIN_PASSWORD", "CORS_ORIGINS",
   "SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_USE_TLS", "SMTP_OVERRIDE_RECIPIENT",
   "ENV", "DOMAIN", "ACME_EMAIL", "LOG_LEVEL", "BACKUP_PASSPHRASE",
@@ -37,6 +37,7 @@ const CRED_TEST_KIND = {
   MISTRAL_API_KEY: "mistral",
   NVIDIA_API_KEY: "nvidia",
   OPENROUTER_API_KEY: "openrouter",
+  ZENMUX_API_KEY: "zenmux",
   TWILIO_ACCOUNT_SID: "twilio", TWILIO_AUTH_TOKEN: "twilio",
   SMTP_HOST: "smtp", SMTP_USERNAME: "smtp", SMTP_PASSWORD: "smtp",
   ADMIN_PASSWORD: "admin_token",
@@ -206,7 +207,9 @@ function fmtUsage(u, quota) {
 
 function fmtUptime(up) {
   if (!up || up.uptime_7d_pct == null) return `<span class="muted">no data yet</span>`;
-  const cls = up.uptime_7d_pct >= 99 ? "ok" : up.uptime_7d_pct >= 95 ? "warning" : "down";
+  // band comes from the backend (history.uptime_band) — one threshold, shared
+  // with the status dot and the detail modal, no re-thresholding here.
+  const cls = { ok: "ok", warn: "warning", down: "down" }[up.uptime_band] || "muted";
   return `<span class="dot ${cls}">●</span> ${up.uptime_7d_pct}%`;
 }
 
@@ -281,7 +284,7 @@ function renderImpactPanel() {
     const c = r.cost;
     if (c && c.ok && c.configured) {
       anyCostConfigured = true;
-      totalCost += c.estimated_usd || 0;
+      totalCost += c.estimated_eur || 0;
     } else if (c && !c.ok) {
       allCostOk = false;
     }
@@ -311,7 +314,7 @@ function renderImpactPanel() {
   if (anyCostConfigured) {
     cards.push(`
       <div class="impact-card">
-        <div class="impact-value">$${totalCost.toFixed(2)}</div>
+        <div class="impact-value">€${totalCost.toFixed(2)}</div>
         <div class="impact-label">Est. LLM cost${allCostOk ? "" : " (partial)"}</div>
       </div>`);
   }
@@ -404,7 +407,7 @@ function renderDetailGlance(r) {
 
   // Uptime 7d
   if (up.uptime_7d_pct != null) {
-    const cls = up.uptime_7d_pct >= 99 ? "" : up.uptime_7d_pct >= 95 ? "warn" : "down";
+    const cls = { ok: "", warn: "warn", down: "down" }[up.uptime_band] || "muted";
     tiles.push(glanceTile("Uptime 7d", `${up.uptime_7d_pct}%`, cls,
       up.latency_p95_ms != null ? `p95 ${up.latency_p95_ms}ms` : `${up.samples_7d} samples`));
   } else {
@@ -428,7 +431,7 @@ function renderDetailGlance(r) {
 
   // Cost (only when configured)
   if (c.ok && c.configured) {
-    tiles.push(glanceTile("Est. cost (mo)", `$${c.estimated_usd.toFixed(2)}`, "", "from configured rates"));
+    tiles.push(glanceTile("Est. cost (mo)", `€${c.estimated_eur.toFixed(2)}`, "", "from configured rates"));
   }
 
   $("detailGlance").innerHTML = tiles.join("");
@@ -509,7 +512,7 @@ function applyDetail(r) {
       `<div class="kv-row"><span class="kv-key">Quota</span><span>${r.quota ? r.quota.toLocaleString() + " tok/mo" + (r.over_quota ? ' — <strong class="down">over quota</strong>' : "") : '<span class="muted">none configured</span>'}</span></div>`;
     const c = r.cost || {};
     if (c.ok && c.configured) {
-      usageHtml += `<div class="kv-row"><span class="kv-key">Est. cost</span><span>$${c.estimated_usd.toFixed(4)}</span></div>`;
+      usageHtml += `<div class="kv-row"><span class="kv-key">Est. cost</span><span>€${c.estimated_eur.toFixed(2)}</span></div>`;
     } else if (c.ok) {
       usageHtml += `<div class="kv-row"><span class="kv-key">Est. cost</span><span class="muted">no rate configured</span></div>`;
     }
@@ -946,7 +949,88 @@ async function openSettingsModal() {
   const resp = await fetch("/api/settings");
   const data = await resp.json();
   $("pollIntervalInput").value = data.poll_interval_seconds;
+  $("opKeyResults").innerHTML = "";
   show("settingsModal");
+  refreshOpKeyStatus();
+}
+
+// -- operator key (fleet-wide managed-field token) ---------------------------
+
+async function refreshOpKeyStatus() {
+  const el = $("opKeyStatus");
+  el.textContent = "Checking…";
+  try {
+    const resp = await fetch("/api/operator-key/status");
+    const data = await resp.json();
+    el.innerHTML = data.configured
+      ? '<span class="ok">●</span> A key is set and stored. Rotate to replace it.'
+      : '<span class="down">●</span> No key set yet — generate one to enable console edits of protected settings.';
+  } catch (e) {
+    el.innerHTML = '<span class="muted">Could not read status — ' + escapeHtml(String(e)) + "</span>";
+  }
+}
+
+function renderOpKeyResults(res) {
+  const box = $("opKeyResults");
+  if (!res || !res.results) { box.innerHTML = ""; return; }
+  const rows = res.results.map((r) => {
+    const dot = r.ok ? '<span class="ok">●</span>' : '<span class="down">●</span>';
+    const detail = r.ok ? "updated & restarted"
+      : escapeHtml((r.stage ? r.stage + ": " : "") + (r.error || "failed"));
+    return '<div class="kv-row"><span class="kv-key">' + dot + " " + escapeHtml(r.name) +
+           '</span><span>' + detail + "</span></div>";
+  }).join("");
+  const head = res.total
+    ? '<p class="' + (res.ok ? "ok" : "muted") + '" style="margin:0 0 6px;">Pushed to ' +
+      res.pushed + " of " + res.total + " instances." +
+      (res.ok ? "" : " Failed ones kept their old key — fix and use “Re-push to all”.") + "</p>"
+    : '<p class="muted">No instances registered.</p>';
+  box.innerHTML = head + rows;
+}
+
+async function rotateOperatorKey() {
+  const typed = prompt(
+    "Generate a NEW operator key and push it to EVERY instance?\n\n" +
+    "This restarts each instance's app for a few seconds (one at a time).\n" +
+    'Type "rotate" to confirm.');
+  if (typed === null) return;
+  const btn = $("rotateOpKeyBtn");
+  const prev = btn.textContent;
+  btn.disabled = true; btn.textContent = "Rotating…";
+  $("opKeyResults").innerHTML = '<p class="muted">Generating key and pushing to all instances…</p>';
+  try {
+    const resp = await fetch("/api/operator-key/rotate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ confirm: typed }),
+    });
+    const data = await resp.json();
+    if (!resp.ok) { $("opKeyResults").innerHTML = '<p class="down">' + escapeHtml(data.detail || "Rotate failed") + "</p>"; return; }
+    renderOpKeyResults(data);
+    refreshOpKeyStatus();
+  } catch (e) {
+    $("opKeyResults").innerHTML = '<p class="down">Rotate failed — ' + escapeHtml(String(e)) + "</p>";
+  } finally {
+    btn.disabled = false; btn.textContent = prev;
+  }
+}
+
+async function pushOperatorKey() {
+  const btn = $("pushOpKeyBtn");
+  const prev = btn.textContent;
+  btn.disabled = true; btn.textContent = "Pushing…";
+  $("opKeyResults").innerHTML = '<p class="muted">Re-sending the stored key to all instances…</p>';
+  try {
+    const resp = await fetch("/api/operator-key/push", { method: "POST" });
+    const data = await resp.json();
+    if (!resp.ok) { $("opKeyResults").innerHTML = '<p class="down">' + escapeHtml(data.detail || "Push failed") + "</p>"; return; }
+    renderOpKeyResults(data);
+    refreshOpKeyStatus();
+  } catch (e) {
+    $("opKeyResults").innerHTML = '<p class="down">Push failed — ' + escapeHtml(String(e)) + "</p>";
+  } finally {
+    btn.disabled = false; btn.textContent = prev;
+  }
 }
 
 async function saveSettings() {
@@ -1376,6 +1460,8 @@ document.addEventListener("DOMContentLoaded", () => {
   $("addClientBtn").addEventListener("click", openAddModal);
   $("settingsBtn").addEventListener("click", openSettingsModal);
   $("saveSettingsBtn").addEventListener("click", saveSettings);
+  $("rotateOpKeyBtn").addEventListener("click", rotateOperatorKey);
+  $("pushOpKeyBtn").addEventListener("click", pushOperatorKey);
   $("editForm").addEventListener("submit", submitEditForm);
   $("fetchTokenBtn").addEventListener("click", fetchTokenViaSSH);
   $("detailRefreshBtn").addEventListener("click", refreshOneDetail);
@@ -1410,7 +1496,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
 // -- tab navigation ----------------------------------------------------------
 
-const PAGES = ["dashboard", "updates", "tests", "onboarding", "credentials", "ledger", "flow", "config", "host"];
+const PAGES = ["dashboard", "updates", "tests", "onboarding", "credentials", "ledger", "flow", "config", "catalog", "pipeline", "host"];
 
 function switchPage(page) {
   PAGES.forEach((p) => {
@@ -1427,6 +1513,8 @@ function switchPage(page) {
   if (page === "ledger") refreshLedger();      // ledger.js
   if (page === "flow") refreshFlow();          // flow.js
   if (page === "config") refreshConfigPage();  // config.js
+  if (page === "catalog") refreshCatalogPage();    // catalog.js
+  if (page === "pipeline") refreshPipelinePage();  // pipeline.js
 }
 
 // -- onboarding stepper ------------------------------------------------------
@@ -2131,8 +2219,8 @@ function testResultCell(name) {
     return `${headline}<div class="muted">${escapeHtml(s.error)}</div>`;
   }
   const checkRows = checks.map((c) =>
-    `<div class="smoke-row ${c.ok ? "smoke-ok" : (c.check === "backup_timer" ? "smoke-warn" : "smoke-fail")}">
-       ${c.ok ? "✔" : (c.check === "backup_timer" ? "⚠" : "✘")} <strong>${escapeHtml(c.check)}</strong>
+    `<div class="smoke-row ${c.ok ? "smoke-ok" : (c.severity === "warn" ? "smoke-warn" : "smoke-fail")}">
+       ${c.ok ? "✔" : (c.severity === "warn" ? "⚠" : "✘")} <strong>${escapeHtml(c.check)}</strong>
        <span class="muted">${escapeHtml(c.detail || "")}</span></div>`).join("");
   const cfgRows = [
     ...(cfg.errors || []).map((x) => `<div class="smoke-row smoke-fail">✘ config: ${escapeHtml(x)}</div>`),
@@ -2227,7 +2315,7 @@ function handleTestEvent(ev) {
     } else {
       testRunState[ev.name] = { state: "fail", summary: sum, checks: ev.checks, config: ev.config, error: ev.error };
       testConsoleLine(`✘ ${ev.name}: ${ev.error || "checks failed"}`);
-      (ev.checks || []).filter((c) => !c.ok && c.check !== "backup_timer").forEach((c) => {
+      (ev.checks || []).filter((c) => !c.ok && c.severity !== "warn").forEach((c) => {
         testConsoleLine(`    ✘ ${c.check}: ${c.detail || ""}`);
       });
       ((ev.config || {}).errors || []).forEach((x) => testConsoleLine(`    ✘ config: ${x}`));

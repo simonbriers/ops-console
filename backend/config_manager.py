@@ -42,6 +42,7 @@ import yaml
 
 from backend import core
 from backend import env_tool
+from backend import providers as providers_mod
 from backend.config import DEFAULT_CONFIG_PATH, load_clients, save_clients
 
 # ---------------------------------------------------------------------------
@@ -101,7 +102,7 @@ FIELD_GROUPS: list[dict[str, Any]] = [
     {"key": "llm", "title": "LLM", "fields": [
         _f("llm_provider", "Provider", "select", managed=True,
            path="llm.provider",
-           options=["mistral", "nvidia", "openrouter", "ollama"]),
+           options=providers_mod.names_for("llm")),
         _f("llm_model", "Model", "model", managed=True, path="llm.model",
            role="llm", provider_field="llm_provider",
            hint="Fleet policy: mistral-small (2.25M tok/min, 5 req/s) by "
@@ -165,10 +166,25 @@ FIELD_GROUPS: list[dict[str, Any]] = [
            provider_field="voice_stt_provider"),
         _f("voice_tts_provider", "TTS provider", managed=True,
            path="voice.tts.provider"),
+        _f("voice_tts_model", "TTS model", "model", managed=True,
+           path="voice.tts.model", role="tts",
+           provider_field="voice_tts_provider"),
         _f("voice_tts_voice_es", "TTS voice (ES)", managed=True,
            path="voice.tts.voice_es"),
         _f("voice_tts_voice_en", "TTS voice (EN)", managed=True,
            path="voice.tts.voice_en"),
+        # Per-language TTS provider/model (multi-model: e.g. Google for ES,
+        # Mistral for EN) + auto language detection. All operator-owned.
+        _f("voice_tts_provider_es", "TTS provider (ES)", managed=True,
+           path="voice.tts.provider_es"),
+        _f("voice_tts_provider_en", "TTS provider (EN)", managed=True,
+           path="voice.tts.provider_en"),
+        _f("voice_tts_model_es", "TTS model (ES)", managed=True,
+           path="voice.tts.model_es"),
+        _f("voice_tts_model_en", "TTS model (EN)", managed=True,
+           path="voice.tts.model_en"),
+        _f("auto_language", "Auto language detection", "checkbox",
+           managed=True, path="site.auto_language"),
         _f("voice_llm_provider", "Voice LLM provider", managed=True,
            path="voice.llm.provider"),
         _f("voice_llm_model", "Voice LLM model", "model", managed=True,

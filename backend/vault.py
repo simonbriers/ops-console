@@ -75,16 +75,27 @@ ROLES = ("llm", "stt", "tts", "email", "sms")
 KIND_META: dict[str, dict[str, Any]] = {
     # mistral serves three roles on one key: LLM, Voxtral STT, and Voxtral
     # TTS (backend/voice/mistral_tts.py — the EU-compliant TTS option)
-    "mistral": {"roles": ["llm", "stt", "tts"], "provider": "mistral", "keys": ["MISTRAL_API_KEY"]},
-    "openrouter": {"roles": ["llm"], "provider": "openrouter", "keys": ["OPENROUTER_API_KEY"]},
-    "nvidia": {"roles": ["llm"], "provider": "nvidia", "keys": ["NVIDIA_API_KEY"]},
+    "mistral": {"roles": ["llm", "stt", "tts"], "provider": "mistral", "keys": ["MISTRAL_API_KEY"],
+                "label": "Mistral · Voxtral"},
+    "openrouter": {"roles": ["llm"], "provider": "openrouter", "keys": ["OPENROUTER_API_KEY"],
+                   "label": "OpenRouter"},
+    "nvidia": {"roles": ["llm"], "provider": "nvidia", "keys": ["NVIDIA_API_KEY"],
+               "label": "NVIDIA"},
+    # zenmux serves two roles on one key: LLM (OpenAI-compatible gateway, free
+    # trial models) and TTS (Create Speech /audio/speech — paid, dev/demo only,
+    # NOT EU-owned). One ZENMUX_API_KEY covers both.
+    "zenmux": {"roles": ["llm", "tts"], "provider": "zenmux", "keys": ["ZENMUX_API_KEY"],
+               "label": "ZenMux (aggregator)"},
     "smtp": {"roles": ["email"], "provider": "smtp",
-             "keys": ["SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_USE_TLS"]},
+             "keys": ["SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_USE_TLS"],
+             "label": "SMTP e-mail"},
     "twilio": {"roles": ["sms"], "provider": "twilio",
-               "keys": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"]},
+               "keys": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"],
+               "label": "Twilio SMS"},
     # provider "google" = the literal voice_tts_provider value instances
     # report (confirmed 2026-07-20 via /admin/config on two live clients)
-    "file/google_tts": {"roles": ["tts"], "provider": "google", "keys": []},
+    "file/google_tts": {"roles": ["tts"], "provider": "google", "keys": [],
+                        "label": "Google Cloud TTS (service-account file)"},
 }
 for _m in KIND_META.values():
     _m["role"] = _m["roles"][0]   # primary role (grouping, back-compat)
@@ -100,7 +111,36 @@ TIERS = ("paid", "free", "local")
 # identified by host+username+password, twilio by sid+token — see
 # _set_matches_env().
 _ID_KEY = {"mistral": "MISTRAL_API_KEY", "openrouter": "OPENROUTER_API_KEY",
-           "nvidia": "NVIDIA_API_KEY"}
+           "nvidia": "NVIDIA_API_KEY", "zenmux": "ZENMUX_API_KEY"}
+
+
+def list_kinds() -> list[dict[str, Any]]:
+    """The kind catalog as plain data — the SINGLE source the frontend renders
+    credential key fields from (Phase 0 dedup). Before this, the env-key /
+    provider / role mapping was hardcoded four times: here in KIND_META plus
+    three copies in the UI — credentials.js:VAULT_FIELDS, catalog.js:
+    CAT_PROVIDERS, and the #vaultKindSelect <option> list in index.html. Both
+    JS files and the kind <select> now build from this endpoint instead, so a
+    new provider is one KIND_META row and nothing else.
+
+    Per kind: `keys` are its .env var names; `id_key` is the single key whose
+    value identifies/aliases the set (only single-key llm-ish kinds have one —
+    it's what the Catalog's per-provider key box uses); `is_file` marks the
+    content_b64 file credential (google_tts.json), which has no typed keys.
+    Order follows KIND_META (stable, insertion order)."""
+    out: list[dict[str, Any]] = []
+    for kind, m in KIND_META.items():
+        out.append({
+            "kind": kind,
+            "provider": m["provider"],
+            "label": m.get("label", kind),
+            "roles": list(m["roles"]),
+            "role": m["role"],
+            "keys": list(m["keys"]),
+            "id_key": _ID_KEY.get(kind),
+            "is_file": kind.startswith("file/"),
+        })
+    return out
 
 
 def _vault_path() -> Path:
@@ -123,6 +163,32 @@ def alias_for(key: str) -> str:
     if not key or key.lower() in ("ollama", "local", "none", "null"):
         return "local"
     return "key_" + hashlib.sha256(key.encode()).hexdigest()[:6]
+
+
+def set_aliases(s: dict[str, Any]) -> list[str]:
+    """Every metrics alias a stored set meters under, in key order. A single-key
+    llm-ish kind aliases under its one key's hash; a comma-separated
+    primary+fallback pair meters each key under its OWN alias, so this returns
+    one alias per key. Non-key kinds (smtp/twilio/file) return [].
+
+    THE one place the id-key comma-split lives: list_sets() and the ledger's
+    alias->set join both call this instead of re-implementing it and reaching
+    into the private _ID_KEY (DUPLICATION_AUDIT 4.3)."""
+    idk = _ID_KEY.get(s.get("kind", ""))
+    if not idk:
+        return []
+    raw = (s.get("values") or {}).get(idk, "") or ""
+    return [alias_for(p) for p in raw.split(",") if p.strip()]
+
+
+def alias_to_set_map() -> dict[str, dict[str, Any]]:
+    """alias -> the vault set that meters under it (a key pair owns several
+    aliases). The join the ledger builds per-key buy-cost on."""
+    out: dict[str, dict[str, Any]] = {}
+    for s in load_vault()["sets"]:
+        for a in set_aliases(s):
+            out[a] = s
+    return out
 
 
 def _upgrade(data: dict[str, Any]) -> tuple[dict[str, Any], bool]:
@@ -173,19 +239,12 @@ def list_sets(redact: bool = True) -> list[dict[str, Any]]:
     out = []
     for s in vault["sets"]:
         c = dict(s)
-        idk = _ID_KEY.get(s.get("kind", ""))
-        if idk:
-            # A comma-separated value is the product's primary+fallback key
-            # pair (resolve_llm key_index 1/2) — ONE env value, but each key
-            # meters under its OWN alias in /admin/metrics by_key. Surface
-            # every alias so the ledger join is visible per key.
-            raw = (s.get("values") or {}).get(idk, "")
-            parts = [p.strip() for p in raw.split(",") if p.strip()]
-            c["aliases"] = [alias_for(p) for p in parts]
-            c["key_count"] = len(parts)
-            c["alias"] = c["aliases"][0] if c["aliases"] else None
-        else:
-            c["aliases"], c["key_count"], c["alias"] = [], 0, None
+        # aliases: one per metered key (a comma-separated primary+fallback pair
+        # meters each key under its OWN alias in /admin/metrics by_key). Comes
+        # from the shared set_aliases() so the split isn't re-implemented here.
+        c["aliases"] = set_aliases(s)
+        c["key_count"] = len(c["aliases"])
+        c["alias"] = c["aliases"][0] if c["aliases"] else None
         c["assigned_to"] = _assigned_clients(vault, s["id"])
         c["roles"] = list(KIND_META.get(s.get("kind"), {}).get("roles", [s.get("role", "llm")]))
         if redact:
@@ -208,6 +267,67 @@ def reveal_set(set_id: str) -> dict[str, Any]:
             c.pop("content_b64", None)  # the file itself stays server-side
             return {"ok": True, "error": None, "set": c}
     return {"ok": False, "error": f"no set with id {set_id!r}", "set": None}
+
+
+def provider_api_key(provider: str) -> str | None:
+    """The first stored, unredacted API key for a provider (the value of its
+    _ID_KEY env var), or None. Lets the config picker's live model browser
+    authenticate a GET /models against the provider without the operator
+    pasting the key again — it's already in the vault. Only single-key llm-ish
+    kinds have an _ID_KEY (mistral/openrouter/nvidia/zenmux); other kinds
+    (smtp/twilio/file) return None."""
+    provider = (provider or "").strip()
+    for s in load_vault()["sets"]:
+        if s.get("provider") == provider:
+            idk = _ID_KEY.get(s.get("kind", ""))
+            if idk:
+                val = ((s.get("values") or {}).get(idk) or "").strip()
+                if val:
+                    return val
+    return None
+
+
+def test_set(set_id: str) -> dict[str, Any]:
+    """Run ONE real, minimal, read-only API call for a stored set's
+    credential WITHOUT applying it anywhere — no .env write, no container
+    recreate. The standalone counterpart to apply_sets()'s per-kind test
+    loop, so an operator can verify a key the moment it's added (or after a
+    rotation) instead of having to apply it to a client to find out.
+
+    Maps the set's kind to the matching env_tool tester, translating the
+    stored ENV-var-keyed values into that tester's argument shape. file
+    kinds (google_tts.json) have no standalone network test — they're
+    verified when applied (the file is uploaded and the instance's own voice
+    check exercises it). Returns {"ok", "error", "kind", "test": {"ok",
+    "message"}}."""
+    s = next((x for x in load_vault()["sets"] if x["id"] == set_id), None)
+    if s is None:
+        return {"ok": False, "error": f"no set with id {set_id!r}", "kind": None, "test": None}
+    kind = s.get("kind")
+    values = s.get("values") or {}
+    if kind == "mistral":
+        test = env_tool.test_mistral(values.get("MISTRAL_API_KEY", ""))
+    elif kind == "openrouter":
+        test = env_tool.test_openrouter(values.get("OPENROUTER_API_KEY", ""))
+    elif kind == "nvidia":
+        test = env_tool.test_nvidia(values.get("NVIDIA_API_KEY", ""))
+    elif kind == "zenmux":
+        test = env_tool.test_zenmux(values.get("ZENMUX_API_KEY", ""))
+    elif kind == "smtp":
+        test = env_tool.test_smtp(
+            values.get("SMTP_HOST", ""), values.get("SMTP_PORT", "587"),
+            values.get("SMTP_USERNAME", ""), values.get("SMTP_PASSWORD", ""),
+            str(values.get("SMTP_USE_TLS", "True")).lower() != "false")
+    elif kind == "twilio":
+        test = env_tool.test_twilio(values.get("TWILIO_ACCOUNT_SID", ""),
+                                    values.get("TWILIO_AUTH_TOKEN", ""))
+    elif kind == "file/google_tts":
+        test = {"ok": False, "message": "file credential — no standalone test; "
+                "verified when applied (google_tts.json is uploaded and the "
+                "instance's own voice check exercises it)"}
+    else:
+        test = {"ok": False, "message": f"no test available for kind {kind!r}"}
+    return {"ok": True, "error": None, "kind": kind, "test": test}
 
 
 def upsert_set(name: str, kind: str, values: dict[str, str] | None,
@@ -428,7 +548,7 @@ def reconcile_client(client: dict[str, Any]) -> dict[str, Any]:
     # drift: credential-looking env keys whose value matches no stored set
     matched_roles = {m["role"] for m in matched}
     for env_key, kind in [("MISTRAL_API_KEY", "mistral"), ("OPENROUTER_API_KEY", "openrouter"),
-                          ("NVIDIA_API_KEY", "nvidia")]:
+                          ("NVIDIA_API_KEY", "nvidia"), ("ZENMUX_API_KEY", "zenmux")]:
         val = (env.get(env_key) or "").strip()
         if val and not any(s.get("kind") == kind and _set_matches_env(s, env)
                            for s in vault["sets"]):
@@ -556,6 +676,8 @@ def apply_sets(client: dict[str, Any], set_ids: list[str]) -> dict[str, Any]:
             tests.append({"kind": kind, **env_tool.test_openrouter(env.get("OPENROUTER_API_KEY", ""))})
         elif kind == "nvidia":
             tests.append({"kind": kind, **env_tool.test_nvidia(env.get("NVIDIA_API_KEY", ""))})
+        elif kind == "zenmux":
+            tests.append({"kind": kind, **env_tool.test_zenmux(env.get("ZENMUX_API_KEY", ""))})
         elif kind == "smtp":
             tests.append({"kind": kind, **env_tool.test_smtp(
                 env.get("SMTP_HOST", ""), env.get("SMTP_PORT", "587"),

@@ -45,8 +45,28 @@ def test_filters_and_defaults():
     assert mc.default_model("llm", "nvidia") is None
 
 
+def test_zenmux_free_models_and_tts_registered():
+    # ZenMux free-tier LLM trials are provider-filterable for the picker; none
+    # is the fleet default, so default_model falls to the first candidate.
+    zen_llm = mc.models_for(role="llm", provider="zenmux")
+    assert {m["id"] for m in zen_llm} == {
+        "moonshotai/kimi-k3-free", "z-ai/glm-4.6v-flash-free", "z-ai/glm-4.7-flash-free"}
+    assert all(m["buy_in_per_m"] == 0.0 for m in zen_llm)  # free = zero buy cost
+    assert mc.default_model("llm", "zenmux") == "moonshotai/kimi-k3-free"
+    # The paid, dev-only Gemini TTS model is registered under the tts role.
+    zen_tts = mc.models_for(role="tts", provider="zenmux")
+    assert {m["id"] for m in zen_tts} == {"google/gemini-3.1-flash-tts-preview"}
+    assert zen_tts[0]["unit"] == "character"
+
+
 def test_llm_models_per_1k_covers_only_llm():
     rows = mc.llm_models_per_1k()
-    assert {r["id"] for r in rows} == {"mistral-small-2506", "mistral-large-2512"}
+    # Every LLM model (incl. the ZenMux free trials, priced at 0) — but no
+    # STT/TTS entries, which have no per-token rate.
+    assert {r["id"] for r in rows} == {
+        "mistral-small-2506", "mistral-large-2512",
+        "moonshotai/kimi-k3-free", "z-ai/glm-4.6v-flash-free", "z-ai/glm-4.7-flash-free"}
     small = next(r for r in rows if r["id"] == "mistral-small-2506")
     assert small["buy_in"] == 0.000085 and small["buy_out"] == 0.000255
+    kimi = next(r for r in rows if r["id"] == "moonshotai/kimi-k3-free")
+    assert kimi["buy_in"] == 0.0 and kimi["buy_out"] == 0.0

@@ -93,6 +93,65 @@ MODEL_CATALOG: list[dict[str, Any]] = [
         "notes": "Text-to-speech, per CHARACTER (~€13.6/M chars). Registered "
                  "for pricing; not metered until Phase 8.",
     },
+    # --- ZenMux (OpenAI-compatible aggregator) --------------------------------
+    # LLM: free-tier trial models — buy rate 0 (that's why they're trialled).
+    # None is the fleet default; mistral-small stays the workhorse. Model ids
+    # are ZenMux's "<provider>/<model>" form. If a "-free" id is later
+    # retired/priced by ZenMux, update it here.
+    {
+        "id": "moonshotai/kimi-k3-free",
+        "provider": "zenmux",
+        "role": "llm",
+        "unit": "tokens",
+        "label": "Kimi K3 (free, via ZenMux)",
+        "default": False,
+        "buy_in_per_m": 0.0,
+        "buy_cached_per_m": 0.0,
+        "buy_out_per_m": 0.0,
+        "notes": "ZenMux free trial model — no buy cost. Tool calling supported.",
+    },
+    {
+        "id": "z-ai/glm-4.6v-flash-free",
+        "provider": "zenmux",
+        "role": "llm",
+        "unit": "tokens",
+        "label": "GLM-4.6V Flash (free, via ZenMux)",
+        "default": False,
+        "buy_in_per_m": 0.0,
+        "buy_cached_per_m": 0.0,
+        "buy_out_per_m": 0.0,
+        "notes": "ZenMux free trial model — no buy cost. Vision-capable.",
+    },
+    {
+        "id": "z-ai/glm-4.7-flash-free",
+        "provider": "zenmux",
+        "role": "llm",
+        "unit": "tokens",
+        "label": "GLM-4.7 Flash (free, via ZenMux)",
+        "default": False,
+        "buy_in_per_m": 0.0,
+        "buy_cached_per_m": 0.0,
+        "buy_out_per_m": 0.0,
+        "notes": "ZenMux free trial model — no buy cost.",
+    },
+    # TTS: ZenMux Create Speech. PAID (ZenMux has no free-tier speech models),
+    # non-EU / dev-only. Registered here for completeness; buy_per_unit is a
+    # placeholder (0.0) because ZenMux's speech price wasn't confirmed — verify
+    # on the model's ZenMux detail page and set the real rate in the ledger
+    # before voice metering (Phase 8) relies on it.
+    {
+        "id": "google/gemini-3.1-flash-tts-preview",
+        "provider": "zenmux",
+        "role": "tts",
+        "unit": "character",
+        "label": "Gemini 3.1 Flash TTS preview (via ZenMux)",
+        "default": False,
+        "buy_per_unit": 0.0,
+        "notes": "ZenMux Speech — PAID (no free speech tier), non-EU/dev-only. "
+                 "Rate UNVERIFIED (placeholder 0.0); confirm on ZenMux and set "
+                 "the real per-character rate in the ledger. Not metered until "
+                 "Phase 8.",
+    },
 ]
 
 MODEL_BY_ID: dict[str, dict[str, Any]] = {m["id"]: m for m in MODEL_CATALOG}

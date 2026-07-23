@@ -1147,7 +1147,9 @@ def _admin_get_json(client: dict[str, Any], path: str, params: dict[str, Any]) -
     # client has one recorded, rides along on EVERY admin call — GETs need
     # it too (managed instances redact SMTP/Twilio secrets from non-operator
     # reads). Harmless on unmanaged instances, which ignore the header.
-    op_token = client.get("operator_token") or ""
+    # Per-client override wins; otherwise the fleet-wide token (one key stored
+    # in clients.json, pushed to every instance by operator_key.rotate) is used.
+    op_token = client.get("operator_token") or cfg.load_operator_token()
     if client.get("admin_via_ssh"):
         port = client.get("admin_local_port")
         ssh_target = client.get("ssh_target") or ""
@@ -1184,8 +1186,10 @@ def _admin_put_json(client: dict[str, Any], path: str, payload: dict[str, Any]) 
     token = _real_token(client)
     # Operator token (managed mode, product Phase 6): required for writes
     # touching MANAGED_CONFIG_FIELDS on a managed instance; ignored by
-    # unmanaged ones. Sent whenever the client record has one.
-    op_token = client.get("operator_token") or ""
+    # unmanaged ones. Per-client override wins; otherwise the fleet-wide
+    # token (operator_key.rotate) is used, so managed writes authenticate
+    # without a per-instance key.
+    op_token = client.get("operator_token") or cfg.load_operator_token()
     body = json.dumps(payload)
     if client.get("admin_via_ssh"):
         port = client.get("admin_local_port")
@@ -1354,33 +1358,57 @@ def check_interactions(client: dict[str, Any], start: str | None = None, end: st
 
 
 def compute_cost_estimate(usage: dict[str, Any], client: dict[str, Any]) -> dict[str, Any]:
-    """Turns already-fetched token usage into a rough $/month figure, using
-    per-1K-token rates the user configures per client (this tool has no
-    way to know a clinic's actual LLM provider/pricing on its own, so it
-    never guesses — `configured: False` means no rate has been set and the
-    dashboard should just hide the number rather than show a misleading
-    $0.00)."""
+    """Turns already-fetched token usage into a rough €/month figure. Rates are
+    EUR/1k tokens and come from the ledger PLAN (the single € pricing authority,
+    so editing a client's plan updates this estimate too); a client with no plan
+    yet falls back to the legacy clients.json cost_per_1k_* fields. `configured:
+    False` means no rate is set anywhere — the dashboard hides the number rather
+    than show a misleading €0.00. (Was mislabeled `estimated_usd` and read only
+    the clients.json fields, which decoupled from the plan after seed — 2.2.)"""
     if not usage.get("ok"):
         return {"ok": False, "error": usage.get("error") or "usage unavailable",
-                "estimated_usd": None, "configured": False}
+                "estimated_eur": None, "configured": False}
 
-    rate_in = client.get("cost_per_1k_input_tokens") or 0.0
-    rate_cached = client.get("cost_per_1k_cached_tokens") or 0.0
-    rate_out = client.get("cost_per_1k_output_tokens") or 0.0
+    rate_in = rate_cached = rate_out = 0.0
+    try:  # lazy import: ledger imports core at module level (circular otherwise)
+        from backend import ledger as _ledger
+        plan = _ledger.get_plan(client.get("name", "")) or {}
+        rate_in = plan.get("sell_in") or 0.0
+        rate_cached = plan.get("sell_cached") or 0.0
+        rate_out = plan.get("sell_out") or 0.0
+    except Exception:
+        pass
+    if not (rate_in or rate_cached or rate_out):   # no plan yet → legacy fields
+        rate_in = client.get("cost_per_1k_input_tokens") or 0.0
+        rate_cached = client.get("cost_per_1k_cached_tokens") or 0.0
+        rate_out = client.get("cost_per_1k_output_tokens") or 0.0
     if not (rate_in or rate_cached or rate_out):
-        return {"ok": True, "error": None, "estimated_usd": None, "configured": False}
+        return {"ok": True, "error": None, "estimated_eur": None, "configured": False}
 
     cost = (
         usage.get("input_tokens", 0) / 1000 * rate_in
         + usage.get("cached_tokens", 0) / 1000 * rate_cached
         + usage.get("output_tokens", 0) / 1000 * rate_out
     )
-    return {"ok": True, "error": None, "estimated_usd": round(cost, 4), "configured": True}
+    return {"ok": True, "error": None, "estimated_eur": round(cost, 4), "configured": True}
 
 
 # --------------------------------------------------------------------------
 # Bundled per-client check
 # --------------------------------------------------------------------------
+
+def apply_uptime_to_status(result: dict[str, Any], uptime: dict[str, Any]) -> None:
+    """Fold the 7d-uptime band into a client's overall status, IN PLACE, so the
+    dashboard status dot reflects the same uptime the detail modal shows (they
+    used to disagree — a low-uptime client read green on the dashboard but red
+    in the modal; DUPLICATION_AUDIT 5.1). A currently-up client with poor 7d
+    uptime is a 'warning' — never 'down' from history alone (health already owns
+    currently-down). Only upgrades 'ok' -> 'warning'; never softens an existing
+    'warning'/'down'. The threshold itself lives once, in history.uptime_band."""
+    band = (uptime or {}).get("uptime_band")
+    if result.get("status") == "ok" and band in ("warn", "down"):
+        result["status"] = "warning"
+
 
 def check_client(client: dict[str, Any]) -> dict[str, Any]:
     """Bundles health + version + usage for one client into a single status

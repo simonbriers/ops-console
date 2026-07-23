@@ -104,16 +104,26 @@ def _db() -> sqlite3.Connection:
     # Per-model buy rates (€/1k tokens), keyed by model id — the item-#9
     # refinement: usage is already snapshotted by-model, so a paid source can
     # be priced at each model's real rate instead of one blended per-source
-    # number. Seeded (INSERT OR IGNORE) from model_catalog so an operator edit
-    # of a rate is never clobbered by the shipped default.
+    # number. model_catalog is the ONE price source: catalog-derived rows are
+    # REFRESHED from it on every connect, so correcting a price in the catalog
+    # actually reaches billing. Rows an operator has edited (operator_set=1, via
+    # set_model_rate) are never touched by the refresh. This replaced a plain
+    # INSERT OR IGNORE that froze every rate at first-seed (DUPLICATION_AUDIT 2.1).
     conn.execute("""CREATE TABLE IF NOT EXISTS model_rates (
         model TEXT PRIMARY KEY, provider TEXT DEFAULT '',
         buy_in REAL DEFAULT 0, buy_cached REAL DEFAULT 0,
-        buy_out REAL DEFAULT 0)""")
+        buy_out REAL DEFAULT 0, operator_set INTEGER DEFAULT 0)""")
+    try:  # existing DBs: mark which rows an operator overrode so the refresh
+        conn.execute("ALTER TABLE model_rates ADD COLUMN operator_set INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # column already exists
     for m in model_catalog.llm_models_per_1k():
         conn.execute(
-            "INSERT OR IGNORE INTO model_rates "
-            "(model, provider, buy_in, buy_cached, buy_out) VALUES (?,?,?,?,?)",
+            "INSERT INTO model_rates (model, provider, buy_in, buy_cached, buy_out) "
+            "VALUES (?,?,?,?,?) "
+            "ON CONFLICT(model) DO UPDATE SET provider=excluded.provider, "
+            "buy_in=excluded.buy_in, buy_cached=excluded.buy_cached, "
+            "buy_out=excluded.buy_out WHERE model_rates.operator_set=0",
             (m["id"], m["provider"], m["buy_in"], m["buy_cached"], m["buy_out"]))
     conn.execute("""CREATE TABLE IF NOT EXISTS alerts (
         ts TEXT NOT NULL, month TEXT NOT NULL, client TEXT NOT NULL,
@@ -209,12 +219,14 @@ def set_model_rate(model: str, provider: str = "", buy_in: float = 0,
     """Upsert one model's buy rate (€/1k tokens). Lets an operator override a
     catalog default or price a model the catalog doesn't ship."""
     with _db() as conn:
+        # operator_set=1 marks this row as an operator override so the
+        # catalog-refresh in _db() never clobbers it (DUPLICATION_AUDIT 2.1).
         conn.execute(
-            "INSERT INTO model_rates (model, provider, buy_in, buy_cached, buy_out) "
-            "VALUES (?,?,?,?,?) "
+            "INSERT INTO model_rates (model, provider, buy_in, buy_cached, buy_out, operator_set) "
+            "VALUES (?,?,?,?,?,1) "
             "ON CONFLICT(model) DO UPDATE SET provider=excluded.provider, "
             "buy_in=excluded.buy_in, buy_cached=excluded.buy_cached, "
-            "buy_out=excluded.buy_out",
+            "buy_out=excluded.buy_out, operator_set=1",
             (model, provider or "", float(buy_in or 0), float(buy_cached or 0),
              float(buy_out or 0)))
     return {"ok": True, "error": None}
@@ -330,17 +342,11 @@ def start_collector() -> None:
 # ---------------------------------------------------------------------------
 
 def _alias_map() -> dict[str, dict[str, Any]]:
-    """alias -> vault set (a comma-separated key pair owns several aliases)."""
-    out: dict[str, dict[str, Any]] = {}
-    for s in vault_mod.load_vault()["sets"]:
-        idk = vault_mod._ID_KEY.get(s.get("kind", ""))
-        if not idk:
-            continue
-        raw = (s.get("values") or {}).get(idk, "")
-        for part in raw.split(","):
-            if part.strip():
-                out[vault_mod.alias_for(part)] = s
-    return out
+    """alias -> vault set (a comma-separated key pair owns several aliases).
+    Delegates to vault.alias_to_set_map so the id-key comma-split lives in one
+    place instead of being re-implemented here off vault's private _ID_KEY
+    (DUPLICATION_AUDIT 4.3)."""
+    return vault_mod.alias_to_set_map()
 
 
 def _source_rate_map(conn: sqlite3.Connection) -> dict[str, dict[str, Any]]:

@@ -78,6 +78,25 @@ def _load_recent(name: str, since: datetime, config_path: str | Path = HISTORY_P
     return rows
 
 
+# Single source for the uptime health bands — the dashboard status dot
+# (via core.apply_uptime_to_status), the detail-modal uptime tile, and the
+# dashboard uptime cell all read this, so the 99/95 thresholds live in ONE
+# place instead of being re-hardcoded on each surface (DUPLICATION_AUDIT 5.1).
+UPTIME_OK_PCT = 99.0
+UPTIME_WARN_PCT = 95.0
+
+
+def uptime_band(pct: float | None) -> str | None:
+    '''"ok" | "warn" | "down" for a 7d uptime %, or None when there is no data.'''
+    if pct is None:
+        return None
+    if pct >= UPTIME_OK_PCT:
+        return "ok"
+    if pct >= UPTIME_WARN_PCT:
+        return "warn"
+    return "down"
+
+
 def compute_uptime_stats(name: str, now: datetime | None = None, config_path: str | Path = HISTORY_PATH) -> dict[str, Any]:
     """Real uptime % and latency percentiles over the last 24h/7d, computed
     from whatever history has actually been logged so far — samples_24h/7d
@@ -106,6 +125,7 @@ def compute_uptime_stats(name: str, now: datetime | None = None, config_path: st
         "samples_7d": len(rows_7d),
         "uptime_24h_pct": uptime_pct(rows_24h),
         "uptime_7d_pct": uptime_pct(rows_7d),
+        "uptime_band": uptime_band(uptime_pct(rows_7d)),
         "latency_p50_ms": latency_percentile(rows_7d, 0.50),
         "latency_p95_ms": latency_percentile(rows_7d, 0.95),
     }

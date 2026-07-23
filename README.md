@@ -746,7 +746,7 @@ enter them here — not a second row.
 Covered in full in `docs/VOICE_NETWORKING.md` (and as a runnable
 `enable-client-voice` Claude Code skill under `.claude/skills/`) — the
 short version, since it cost real time to work out and is worth knowing
-before it comes up again: a client's voice call can fail in three
+before it comes up again: a client's voice call can fail in four
 different, easy-to-conflate ways — (1) it "rings but never answers"
 because plain bridge-mode Docker networking has no path for WebRTC's real
 audio (UDP, negotiated separately from the HTTPS signaling) to reach the
@@ -761,10 +761,89 @@ real compliance guard, not a bug, and bypassing it (`ENV=dev`) is a
 business decision to make per client, never a default; (3) a
 `PermissionError` writing `/data/site_config.yaml` from ownership drift on
 the volume, fixed with `chown -R appuser:appuser /data` as root inside the
-container. New clients from the wizard ship with a full, ready-to-enable
+container; and (4) a **provider/voice mismatch** — `voice.tts.provider:
+google` with a `voice_es`/`voice_en` that's a **UUID** (a Mistral voice id
+from `mistral_voice_tool.py` experiments) instead of a Google voice name
+(`<locale>-Chirp3-HD-<name>` or `<locale>-Neural2-<x>`). Google 404s the
+unknown voice, `google_tts.py`'s `run_tts` raises, and the pipeline speaks its
+fixed fallback apology and ends the call. The giveaway is one language working
+while the other fails (only the bad slot 404s) — seen live 2026-07-23, an
+English `voice_en` UUID while Spanish `voice_es` was a valid Chirp3-HD voice.
+Whenever the provider is `google`, both slots must be Google names, never a
+UUID. New clients from the wizard ship with a full, ready-to-enable
 `voice:` block and voice-capable networking by default — turning it on for
 any client (new or old) is the skill's job, not a from-scratch
 investigation.
+
+## Operator key — one fleet-wide managed-field token (Settings tab)
+
+**The problem this solves.** Managed config fields (voice, LLM/STT providers,
+models — anything tagged `managed=True` in `config_manager.FIELD_GROUPS`) can
+only be written through a running instance's admin API when the request carries
+an `X-Operator-Token` that matches that instance's `OPERATOR_TOKEN` env var
+(enforced instance-side in `backend/config.py`'s `managed_mode()`/
+`operator_token()`, checked on `PUT /admin/config`). That token has to exist on
+the box **and** be known to the console, or a managed-field edit from the
+Config tab silently does nothing — the instance rejects it. Setting and syncing
+that token by hand on every instance doesn't scale, and it's the exact reason a
+voice edit from the console "wouldn't save" until this shipped.
+
+**What it is.** One shared operator token for the whole fleet, generated and
+stored **once** in the console (top-level `operator_token` in `clients.json`,
+alongside `clients`/`hosts`/`poll_interval_seconds`), and pushed into every
+instance's `.env`. You never see or type it. A per-client `operator_token` in a
+client's own entry still wins if set; otherwise every client inherits the fleet
+key — resolved in `core._admin_get_json`/`_admin_put_json`
+(`client.get("operator_token") or cfg.load_operator_token()`), so managed-field
+writes authenticate automatically.
+
+**Where it lives.** Settings tab (far-right) → **Operator key** section, under
+the poll-interval box. Two buttons:
+- **Generate / rotate key** — mints a fresh random key (`secrets.token_urlsafe(32)`),
+  pushes it to every instance, stores it. Typed "rotate" confirmation, because
+  it restarts each instance's app.
+- **Re-push to all** — re-sends the *already stored* key without minting a new
+  one; for retrying an instance that missed a rotation, or seeding a freshly
+  onboarded client.
+
+**How a push works** (`backend/operator_key.py`, per instance, sequentially —
+a rolling restart, not a simultaneous fleet bounce): `env_tool.read_remote_env`
+→ **merge** `OPERATOR_TOKEN` into the existing map (so no other secret in the
+`.env` is lost) → `env_tool.write_remote_env` (which backs the file up first) →
+recreate the app so the new env loads. The recreate is the same override-aware,
+**app-only** `docker compose up -d` scoping `deploy_client` uses — a satellite
+with a `docker-compose.override.yml` only ever recreates its `app`, never the
+shared `dental-agent-caddy` container. A restart alone won't do: an env-var
+change is only picked up on container **recreate**.
+
+**Failure handling.** The new key is stored **even if some pushes fail** — the
+console must use the value it just tried to install fleet-wide. Any instance
+that failed keeps its **old** key and is listed under `failed` for retry (fix
+it, then **Re-push to all**). You are never locked out: SSH is unaffected by the
+operator token, so the file-edit path always remains.
+
+**Deployment shape.** This ships **console-only** — no chatbot code changed. The
+instances already had the `OPERATOR_TOKEN`-reading logic; they just never had a
+token. So you rebuild/restart the ops-console and that's the whole deploy. The
+*runtime* effect of clicking Rotate is what reaches the instances (writes their
+`.env`, few-seconds app recreate each) — so rotate off-peak, not mid-demo. And
+the token only **gates** anything on instances running `site.managed: true`; on
+a `managed: false` instance it's written but inert (those fields were never
+locked, so the admin token alone already edits them).
+
+**Security note.** It's a shared secret, so a leak from one place works on all —
+but the operator token is a *lesser* key than the SSH access you already hold
+fleet-wide, so sharing it doesn't open a new class of risk. Keep the per-instance
+`ADMIN_PASSWORD` random per box regardless (that's the primary/clinic-facing
+login); only the *operator* token is shared.
+
+**Files.** `backend/operator_key.py` (new — generate/push/rotate/push_existing),
+`backend/config.py` (`load_operator_token`/`save_operator_token` + the
+`operator_token` payload key), `backend/core.py` (the fleet-key fallback in both
+admin calls), `backend/routes.py` (`GET /api/operator-key/status`, `POST
+/api/operator-key/rotate`, `POST /api/operator-key/push`),
+`frontend/index.html` + `frontend/app.js` (the Settings-tab UI; app.js
+cache-buster bumped to `obv2-17`).
 
 ## Known gaps (not built yet)
 

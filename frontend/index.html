@@ -24,6 +24,8 @@
       <button class="tab" data-page="ledger">Tokens</button>
       <button class="tab" data-page="flow">Flow</button>
       <button class="tab" data-page="config">Config</button>
+      <button class="tab" data-page="catalog">Catalog</button>
+      <button class="tab" data-page="pipeline">Pipeline</button>
       <button class="tab" data-page="host">Host / VPS</button>
       <button class="tab tab-right" id="settingsBtn">Settings</button>
     </nav>
@@ -214,35 +216,16 @@
       </section>
 
       <section class="ob-panel">
-        <h3>Who runs on what</h3>
-        <p class="muted">Live assignment per client and role. <em>Reconcile</em> reads each
-        client's remote <code>.env</code> (read-only) and matches it against the vault —
-        backfills this table for clients set up before assignments existed, and flags
-        <span class="vault-drift">drift</span>: live keys the vault doesn't know.</p>
-        <div class="ob-form">
-          <button type="button" id="vaultReconcileBtn">Reconcile from servers</button>
-          <span id="vaultReconcileStatus" class="muted"></span>
-        </div>
-        <table id="vaultMatrix">
-          <thead><tr><th>Client</th><th>LLM</th><th>STT</th><th>TTS</th><th>E-mail</th><th>SMS</th><th></th></tr></thead>
-          <tbody id="vaultMatrixBody"><tr><td colspan="7" class="empty">Loading…</td></tr></tbody>
-        </table>
-        <p class="muted">Change a dropdown and press that row's <strong>Apply</strong> — merges into
-        the client's <code>.env</code> (backed up server-side), tests the credential, and
-        <strong>recreates the container</strong>. Disruptive by nature: don't swap on the frozen
-        instances (chat.*, primeconnectai.*) until the overhaul cutover — use acme.</p>
-      </section>
-
-      <section class="ob-panel">
         <h3>Add / edit a set</h3>
         <form id="vaultForm" class="ob-form">
           <input type="hidden" name="id" />
           <label>Name <input name="name" placeholder="Mistral main key" required /></label>
           <label>Kind
             <select name="kind" id="vaultKindSelect">
-              <option value="mistral">LLM — mistral (MISTRAL_API_KEY)</option>
+              <option value="mistral">LLM/STT/TTS — mistral · Voxtral (MISTRAL_API_KEY)</option>
               <option value="openrouter">LLM — openrouter (OPENROUTER_API_KEY)</option>
               <option value="nvidia">LLM — nvidia (NVIDIA_API_KEY)</option>
+              <option value="zenmux">LLM/TTS — zenmux (ZENMUX_API_KEY)</option>
               <option value="smtp">E-mail — smtp</option>
               <option value="twilio">SMS — twilio</option>
               <option value="file/google_tts">TTS — google_tts.json (file)</option>
@@ -392,6 +375,37 @@
         <div id="cfgGroups"><p class="empty">Pick a client and press Load.</p></div>
       </section>
     </div><!-- /page-config -->
+
+    <div id="page-catalog" class="page hidden">
+      <p class="muted" style="margin:.2rem 0 .6rem">The <strong>allow-list</strong>, per role: which providers are
+      valid and which of their models may run. The Pipeline picks from exactly this. Provider <em>keys</em> are
+      managed on the <strong>Credentials</strong> tab — this tab only curates which models and voices are approved.</p>
+      <div id="catRolesBody"></div>
+    </div><!-- /page-catalog -->
+
+    <div id="page-pipeline" class="page hidden">
+      <section class="ob-panel">
+        <div class="ob-form" style="align-items:center">
+          <h3 style="margin:0">Pipeline</h3>
+          <label>Clinic <select id="plClientSelect"></select></label>
+          <button type="button" id="plReloadBtn">Reload</button>
+          <button type="button" id="plApplyBtn" class="primary" disabled>Apply changes</button>
+          <span id="plStatus" class="muted"></span>
+        </div>
+        <p class="muted" style="margin:.3rem 0">
+          Each clinic's stream, top to bottom: <strong>provider → model → voice → endpoint</strong>, per lane.
+          Provider &amp; model options come from the vault (approved only). Editing wires this clinic's live
+          config (a hot reload — no container recreate); the provider's <em>key</em> still has to be in the vault.
+          <span style="white-space:nowrap"><span style="color:#22a06b">■</span> set</span> ·
+          <span style="white-space:nowrap"><span style="color:#d98a00">■</span> needs a pick</span> ·
+          <span style="white-space:nowrap"><span style="color:#dd3333">■</span> not EU (prod-blocked)</span> ·
+          <span style="white-space:nowrap"><span style="color:#c2c2c2">■</span> unset</span>
+        </p>
+        <div id="plPending" class="muted" style="margin:.2rem 0"></div>
+        <div id="plGraph"><p class="empty">Pick a clinic.</p></div>
+        <span id="plApplyStatus" class="muted"></span>
+      </section>
+    </div><!-- /page-pipeline -->
   </main>
 
   <!-- Detail modal -->
@@ -596,21 +610,43 @@
       <div class="modal-actions">
         <button id="saveSettingsBtn" class="primary">Save</button>
       </div>
+
+      <hr class="op-key-sep" />
+      <div class="op-key">
+        <h3 style="margin:0 0 4px;">Operator key</h3>
+        <p class="op-key-desc muted" style="margin:0 0 8px;font-size:13px;">
+          One shared key that lets this console change protected settings
+          (voice, providers, models) on every instance. It's stored here and
+          pushed into each instance's <code>.env</code> over SSH — you never
+          have to remember it. Rotating generates a fresh key, sends it
+          everywhere, and briefly restarts each instance's app.
+        </p>
+        <p id="opKeyStatus" class="muted" style="margin:0 0 8px;">Checking…</p>
+        <div class="modal-actions" style="justify-content:flex-start;">
+          <button id="rotateOpKeyBtn">Generate / rotate key…</button>
+          <button id="pushOpKeyBtn" title="Re-send the existing key to instances that missed a rotation (no new key)">Re-push to all</button>
+        </div>
+        <div id="opKeyResults" class="op-key-results" style="margin-top:10px;"></div>
+      </div>
     </div>
   </div>
 
-  <script src="/static/app.js?v=obv2-16"></script>
+  <script src="/static/app.js?v=obv2-19"></script>
   <!-- Credentials tab (vault v2). Split out of app.js per
        docs/TOKEN_ECONOMY_PLAN.md ("the app.js split starts here").
        Loads AFTER app.js: reuses its $/show/hide/escapeHtml globals and
        provides refreshVault()/populateVaultClientSelect() that
        switchPage() calls. -->
-  <script src="/static/credentials.js?v=vault2-7"></script>
+  <script src="/static/credentials.js?v=vault2-8"></script>
   <!-- Tokens tab (metering ledger, TOKEN_ECONOMY_PLAN.md Phases 2+3). -->
   <script src="/static/ledger.js?v=ledger-5"></script>
   <!-- Flow tab (tanks & pipes visual, Phase 4). -->
   <script src="/static/flow.js?v=flow-1"></script>
   <!-- Config tab (config manager, Phase 7). -->
-  <script src="/static/config.js?v=cfgmgr-1"></script>
+  <script src="/static/config.js?v=cfgmgr-3"></script>
+  <!-- Catalog tab (role-first allow-list: providers -> allowed models). -->
+  <script src="/static/catalog.js?v=catalog-4"></script>
+  <!-- Pipeline tab (per-clinic node-graph of the model/comms stream). -->
+  <script src="/static/pipeline.js?v=pipeline-3"></script>
 </body>
 </html>

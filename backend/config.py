@@ -26,7 +26,7 @@ from typing import Any
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CONFIG_PATH = Path(os.environ.get("CLIENTS_CONFIG", str(PROJECT_ROOT / "clients.json")))
 
-_DEFAULT_PAYLOAD = {"poll_interval_seconds": 60, "clients": [], "hosts": []}
+_DEFAULT_PAYLOAD = {"poll_interval_seconds": 60, "clients": [], "hosts": [], "operator_token": ""}
 
 
 def _read(config_path: str | Path) -> dict[str, Any]:
@@ -83,6 +83,23 @@ def save_hosts(hosts: list[dict[str, Any]], config_path: str | Path = DEFAULT_CO
 def save_poll_interval(poll_interval_seconds: int, config_path: str | Path = DEFAULT_CONFIG_PATH) -> None:
     data = _read(config_path)
     data["poll_interval_seconds"] = poll_interval_seconds
+    _write(data, config_path)
+
+
+def load_operator_token(config_path: str | Path = DEFAULT_CONFIG_PATH) -> str:
+    """The fleet-wide operator token (empty string when unset). One value,
+    stored once here, that every client inherits unless its own entry sets a
+    per-client `operator_token` override — so managed-field config writes
+    authenticate without a per-instance key to remember. Written only by the
+    operator-key rotate flow (backend/operator_key.py)."""
+    return str(_read(config_path).get("operator_token", "") or "")
+
+
+def save_operator_token(token: str, config_path: str | Path = DEFAULT_CONFIG_PATH) -> None:
+    """Persist the fleet operator token, preserving clients/hosts/interval
+    (same read-modify-write discipline as every other save_* here)."""
+    data = _read(config_path)
+    data["operator_token"] = token or ""
     _write(data, config_path)
 
 

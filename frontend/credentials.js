@@ -14,14 +14,44 @@
 const VAULT_ROLES = ["llm", "stt", "tts", "email", "sms"];
 const VAULT_ROLE_LABELS = { llm: "LLM", stt: "STT", tts: "TTS", email: "E-mail", sms: "SMS" };
 
-const VAULT_FIELDS = {
+// kind -> env keys. Populated at load from GET /api/vault/kinds (the single
+// backend source, vault.KIND_META); this literal is only a fallback used if
+// that fetch fails. Do NOT add providers here — add a KIND_META row instead.
+let VAULT_FIELDS = {
   "mistral": ["MISTRAL_API_KEY"],
   "openrouter": ["OPENROUTER_API_KEY"],
   "nvidia": ["NVIDIA_API_KEY"],
+  "zenmux": ["ZENMUX_API_KEY"],
   "smtp": ["SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_USE_TLS"],
   "twilio": ["TWILIO_ACCOUNT_SID", "TWILIO_AUTH_TOKEN", "TWILIO_FROM_NUMBER"],
   "file/google_tts": [],
 };
+let vaultKinds = [];   // full /api/vault/kinds payload (see loadVaultKinds)
+
+// Load the kind catalog from the backend and rebuild both VAULT_FIELDS and the
+// #vaultKindSelect <option> list from it, so neither is hardcoded here or in
+// index.html. Falls back silently to the literals above if the fetch fails.
+async function loadVaultKinds() {
+  try {
+    vaultKinds = await (await fetch("/api/vault/kinds")).json();
+  } catch { vaultKinds = []; }
+  if (Array.isArray(vaultKinds) && vaultKinds.length) {
+    VAULT_FIELDS = {};
+    for (const k of vaultKinds) VAULT_FIELDS[k.kind] = k.keys || [];
+    const sel = $("vaultKindSelect");
+    if (sel) {
+      const prev = sel.value;
+      sel.innerHTML = vaultKinds.map((k) => {
+        const roles = (k.roles || []).map((r) => r.toUpperCase()).join("/");
+        const hint = k.is_file ? "file" : (k.keys || []).join(", ");
+        const txt = `${roles ? roles + " — " : ""}${k.label || k.kind}${hint ? ` (${hint})` : ""}`;
+        return `<option value="${escapeHtml(k.kind)}">${escapeHtml(txt)}</option>`;
+      }).join("");
+      if (prev && [...sel.options].some((o) => o.value === prev)) sel.value = prev;
+    }
+  }
+  renderVaultFields();
+}
 
 let vaultSets = [];          // latest redacted /api/vault/sets payload
 let vaultAssignments = [];   // latest /api/vault/assignments payload
@@ -148,8 +178,10 @@ async function refreshVault() {
         <td class="muted">${escapeHtml((s.updated || "").slice(0, 16))}</td>
         <td class="vault-actions">
           <button type="button" class="vault-reveal" data-id="${escapeHtml(s.id)}">Reveal</button>
+          <button type="button" class="vault-test" data-id="${escapeHtml(s.id)}">Test</button>
           <button type="button" class="vault-edit" data-id="${escapeHtml(s.id)}">Edit</button>
           <button type="button" class="danger vault-del" data-id="${escapeHtml(s.id)}">Delete</button>
+          <div class="muted vault-test-status" data-id="${escapeHtml(s.id)}"></div>
         </td>
       </tr>`);
     }
@@ -165,10 +197,43 @@ async function refreshVault() {
   body.querySelectorAll(".vault-reveal").forEach((btn) => {
     btn.addEventListener("click", () => vaultToggleReveal(btn.dataset.id, btn));
   });
+  body.querySelectorAll(".vault-test").forEach((btn) => {
+    btn.addEventListener("click", () => vaultTestSet(btn.dataset.id, btn));
+  });
   body.querySelectorAll(".vault-edit").forEach((btn) => {
     btn.addEventListener("click", () => vaultEditSet(btn.dataset.id));
   });
   await renderVaultMatrix();
+}
+
+async function vaultTestSet(setId, btn) {
+  // Standalone credential check: one real, read-only API call against the
+  // stored key (POST /api/vault/sets/{id}/test) — no .env write, no container
+  // recreate, unlike applying the set to a client. Result shows inline.
+  const row = $("vaultTableBody").querySelector(`tr[data-id="${CSS.escape(setId)}"]`);
+  if (!row) return;
+  const statusEl = row.querySelector(".vault-test-status");
+  const prev = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = "Testing…";
+  if (statusEl) statusEl.innerHTML = `<span class="muted">testing…</span>`;
+  try {
+    const r = await fetch(`/api/vault/sets/${encodeURIComponent(setId)}/test`, { method: "POST" });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok || !data.ok) {
+      if (statusEl) statusEl.innerHTML = `<span class="down">✘ ${escapeHtml(data.detail || "test failed")}</span>`;
+      return;
+    }
+    const t = data.test || {};
+    const cls = t.ok ? "up" : "down";
+    const mark = t.ok ? "✔" : "✘";
+    if (statusEl) statusEl.innerHTML = `<span class="${cls}">${mark} ${escapeHtml(t.message || (t.ok ? "OK" : "failed"))}</span>`;
+  } catch (e) {
+    if (statusEl) statusEl.innerHTML = `<span class="down">✘ ${escapeHtml(String(e))}</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = prev;
+  }
 }
 
 async function vaultToggleReveal(setId, btn) {
@@ -407,7 +472,9 @@ document.addEventListener("DOMContentLoaded", () => {
   $("vaultFormResetBtn").addEventListener("click", resetVaultForm);
   $("vaultImportBtn").addEventListener("click", vaultImport);
   $("vaultApplyBtn").addEventListener("click", vaultApply);
-  $("vaultReconcileBtn").addEventListener("click", vaultReconcile);
+  // "Who runs what" moved to the Pipeline tab; its reconcile button may be absent.
+  const _rb = $("vaultReconcileBtn");
+  if (_rb) _rb.addEventListener("click", vaultReconcile);
   $("openLegacyCredsBtn").addEventListener("click", () => openCredsModal());
-  renderVaultFields();
+  loadVaultKinds();   // fills VAULT_FIELDS + the kind <select>, then renders fields
 });

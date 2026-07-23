@@ -215,13 +215,20 @@ def _generate_starter_site_config(display_name: str, medical: bool = False) -> s
     strictly EU-compliant (e.g. an actual medical/dental clinic). See
     docs/VOICE_NETWORKING.md for the full runbook either way."""
     safe_name = display_name.replace('"', "'")
+    # Fleet policy is "mistral-small by default, larger only as a named
+    # exception" — so the starter LLM must come from the catalog's default
+    # entry, not a hardcoded literal (which had drifted to the expensive
+    # mistral-large-latest, an id that isn't even in the catalog). See
+    # docs/DUPLICATION_AUDIT.md finding 1.2.
+    from backend import model_catalog
+    default_llm = model_catalog.default_model("llm", "mistral") or "mistral-small-2506"
     return f"""consultants:
 - name: "Owner"
   name_spoken_en: "Owner"
   name_spoken_es: "Owner"
   specialty: "General inquiries"
 llm:
-  model: mistral-large-latest
+  model: {default_llm}
   provider: mistral
   temperature: 0.3
 security:

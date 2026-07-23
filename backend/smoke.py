@@ -90,8 +90,12 @@ def analyze_env_text(text: str) -> tuple[list[str], list[str]]:
     return problems, notes
 
 
-def _row(check: str, ok: bool, detail: str) -> dict[str, Any]:
-    return {"check": check, "ok": bool(ok), "detail": (detail or "")[:400]}
+def _row(check: str, ok: bool, detail: str, severity: str = "critical") -> dict[str, Any]:
+    """severity: "critical" (a failure fails the suite) or "warn" (a failure is
+    surfaced but doesn't fail the suite — e.g. backup_timer). This is the ONE
+    place a check's severity is declared; callers read row["severity"] instead
+    of string-matching the check name in five spots (DUPLICATION_AUDIT 5.2)."""
+    return {"check": check, "ok": bool(ok), "detail": (detail or "")[:400], "severity": severity}
 
 
 def run_smoke(client: dict[str, Any]) -> list[dict[str, Any]]:
@@ -188,8 +192,9 @@ def run_smoke(client: dict[str, Any]) -> list[dict[str, Any]]:
     if ssh_target and project:
         ok, out = run_ssh(ssh_target, f"systemctl is-active {project}-backup.timer 2>&1")
         rows.append(_row("backup_timer", ok and out.strip() == "active",
-                         out.strip()[-120:] or "no output"))
+                         out.strip()[-120:] or "no output", severity="warn"))
     else:
-        rows.append(_row("backup_timer", False, "skipped — no ssh_target/remote_dir"))
+        rows.append(_row("backup_timer", False, "skipped — no ssh_target/remote_dir",
+                         severity="warn"))
 
     return rows

@@ -25,8 +25,13 @@ from backend import smoke as smoke_mod
 from backend import validator as validator_mod
 from backend import ledger as ledger_mod
 from backend import model_catalog as model_catalog_mod
+from backend import voice_catalog as voice_catalog_mod
+from backend import voice_registry as voice_registry_mod
 from backend import vault as vault_mod
 from backend import config_manager as config_manager_mod
+from backend import model_registry as model_registry_mod
+from backend import operator_key as operator_key_mod
+from backend import providers as providers_mod
 
 router = APIRouter(prefix="/api")
 
@@ -134,6 +139,7 @@ def list_clients() -> list[dict[str, Any]]:
     history.maybe_prune()
     for r in results:
         r["uptime"] = history.compute_uptime_stats(r["name"])
+        core.apply_uptime_to_status(r, r["uptime"])
     return results
 
 
@@ -144,6 +150,7 @@ def get_client_status(name: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"No client named {name!r}")
     result = core.check_client(client)
     result["uptime"] = history.compute_uptime_stats(name)
+    core.apply_uptime_to_status(result, result["uptime"])
     return result
 
 
@@ -639,6 +646,47 @@ def update_settings(body: SettingsIn) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# Fleet operator key (see backend/operator_key.py): one shared operator token,
+# generated + stored in the console and pushed to every instance's .env over
+# SSH, so managed-field config writes (voice, providers, models) authenticate
+# without a per-instance key. Never returns the key to the browser.
+# ---------------------------------------------------------------------------
+class OperatorKeyRotateIn(BaseModel):
+    confirm: str = ""
+
+
+@router.get("/operator-key/status")
+def operator_key_status() -> dict[str, Any]:
+    """Whether a fleet operator key is stored (boolean only — never the value)."""
+    return {"configured": operator_key_mod.is_configured()}
+
+
+@router.post("/operator-key/rotate")
+def operator_key_rotate(body: OperatorKeyRotateIn) -> dict[str, Any]:
+    """Mint a NEW key, push it to every instance (rolling app recreate), store
+    it. Guarded by a typed confirmation because it restarts every instance's
+    app. Returns per-instance results, never the key. Instances that fail the
+    push keep the old key and are listed under `failed` for retry — you're
+    never locked out (SSH is unaffected)."""
+    if (body.confirm or "").strip().lower() != "rotate":
+        raise HTTPException(
+            status_code=400,
+            detail='Type "rotate" to confirm — this restarts every instance\'s app.')
+    return operator_key_mod.rotate(cfg.load_clients())
+
+
+@router.post("/operator-key/push")
+def operator_key_push() -> dict[str, Any]:
+    """Push the ALREADY-STORED key to instances (retry failures / seed a new
+    client) without minting a new one. 400 if no key has been minted yet."""
+    result = operator_key_mod.push_existing(cfg.load_clients())
+    if not result.get("configured"):
+        raise HTTPException(status_code=400,
+                            detail=result.get("error") or "no operator key stored yet")
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Onboarding v2 (docs/ONBOARDING_V2_PLAN.md): the stepper API, teardown,
 # smoke suite, config validation, and the credentials vault. Appended as one
 # block; every streaming endpoint speaks the same NDJSON dialect as
@@ -972,8 +1020,8 @@ def run_onboarding_step(deploy_name: str, step_id: str, body: StepRunIn | None =
                     # per the 2026-07-19 acceptance bar: a clean deploy shows
                     # NO red. (Caddyfile commit is auto-attempted at wiring
                     # time now; see wire_caddy_stream.)
-                    critical = [r for r in rows if r["check"] != "backup_timer"]
-                    warn_rows = [r for r in rows if r["check"] == "backup_timer" and not r["ok"]]
+                    critical = [r for r in rows if r.get("severity", "critical") != "warn"]
+                    warn_rows = [r for r in rows if r.get("severity") == "warn" and not r["ok"]]
                     caddy_ok = bool(caddy_gate.get("clean")) and bool(caddy_gate.get("pushed"))
                     ok = all(r["ok"] for r in critical)
                     parts = []
@@ -1048,7 +1096,7 @@ def client_smoke(name: str) -> dict[str, Any]:
     if client is None:
         raise HTTPException(status_code=404, detail=f"No client named {name!r}")
     rows = smoke_mod.run_smoke(client)
-    return {"ok": all(r["ok"] for r in rows if r["check"] != "backup_timer"), "checks": rows}
+    return {"ok": all(r["ok"] for r in rows if r.get("severity", "critical") != "warn"), "checks": rows}
 
 
 def _validate_live_config(client: dict[str, Any]) -> dict[str, Any]:
@@ -1115,9 +1163,9 @@ def test_batch(body: TestBatchIn) -> StreamingResponse:
         checks = smoke_mod.run_smoke(client)
         config_res = _validate_live_config(client)
         critical_fails = [r["check"] for r in checks
-                          if not r["ok"] and r["check"] != "backup_timer"]
+                          if not r["ok"] and r.get("severity", "critical") != "warn"]
         warnings: list[str] = []
-        if any(r["check"] == "backup_timer" and not r["ok"] for r in checks):
+        if any(r.get("severity") == "warn" and not r["ok"] for r in checks):
             warnings.append("backup timer not active")
         warnings.extend(f"config: {w}" for w in config_res.get("warnings") or [])
         config_errors = config_res.get("errors") or []
@@ -1214,6 +1262,16 @@ def vault_list() -> list[dict[str, Any]]:
     return vault_mod.list_sets(redact=True)
 
 
+@router.get("/vault/kinds")
+def vault_kinds() -> list[dict[str, Any]]:
+    """The credential-kind catalog (env keys, provider, roles, label, id_key)
+    the Credentials vault form AND the Catalog provider box both render from —
+    Phase 0 single source, replacing the mapping formerly hardcoded in
+    credentials.js (VAULT_FIELDS), catalog.js (CAT_PROVIDERS), and the
+    #vaultKindSelect <option> markup in index.html."""
+    return vault_mod.list_kinds()
+
+
 @router.post("/vault/sets")
 def vault_upsert(body: VaultSetIn) -> dict[str, Any]:
     res = vault_mod.upsert_set(body.name, body.kind, body.values, body.content_b64, body.id,
@@ -1231,6 +1289,298 @@ def vault_reveal(set_id: str) -> dict[str, Any]:
     if not res["ok"]:
         raise HTTPException(status_code=404, detail=res["error"])
     return res
+
+
+@router.post("/vault/sets/{set_id}/test")
+def vault_test(set_id: str) -> dict[str, Any]:
+    """Run one real, read-only credential check for a stored set WITHOUT
+    applying it anywhere (no .env write, no container recreate) — the
+    standalone counterpart to apply's per-kind test. POST (not GET) to mirror
+    /reveal and keep credential resources off cacheable GET lines."""
+    res = vault_mod.test_set(set_id)
+    if not res["ok"]:
+        raise HTTPException(status_code=404, detail=res["error"])
+    return res
+
+
+@router.get("/provider-models")
+def provider_models(provider: str) -> dict[str, Any]:
+    """Live list of the models a provider currently offers (its OpenAI-
+    compatible GET /models), for the config model picker's browse/filter UI.
+    The API key comes from the vault (first stored set of that provider) so the
+    operator never re-pastes it; ollama needs none. Read-only — no credential
+    value is ever returned, only model ids/metadata."""
+    provider = (provider or "").strip()
+    key = vault_mod.provider_api_key(provider)
+    if not key and provider != "ollama":
+        return {"ok": False, "provider": provider, "models": [],
+                "message": f"no {provider!r} credential in the vault — add one under Credentials first"}
+    res = env_tool.list_provider_models(provider, key or "")
+    return {"ok": res["ok"], "provider": provider,
+            "message": res.get("message"), "models": res.get("models", [])}
+
+
+class PipelineTestIn(BaseModel):
+    kind: str                       # "llm" | "tts" | "stt_conn" | "stt"
+    provider: str
+    model: str | None = None
+    voice: str | None = None
+    language: str | None = None
+    text: str | None = None
+    audio: str | None = None        # base64 WAV (or data: URL) for stt
+
+
+def _google_sa_info() -> dict[str, Any] | None:
+    """The Google service-account JSON stored in the vault as the
+    file/google_tts credential (content_b64), decoded — or None. This is the
+    same file the live chatbot uses; the console reads it to run Google TTS
+    itself, so Google is a real, testable credential, not 'missing'."""
+    import base64 as _b64
+    import json as _json
+    for s in vault_mod.load_vault()["sets"]:
+        if s.get("kind") == "file/google_tts" and s.get("content_b64"):
+            try:
+                return _json.loads(_b64.b64decode(s["content_b64"]))
+            except Exception:
+                return None
+    return None
+
+
+@router.post("/pipeline/test")
+def pipeline_test(body: PipelineTestIn) -> dict[str, Any]:
+    """Run one pipeline lane's current combination and return what comes back —
+    a reply for LLM, a playable clip for TTS. Credentials come from the vault:
+    an API key for key providers, the google_tts.json file for Google. Console
+    TTS covers ZenMux (REST) and Google (service-account, exactly as the live
+    bot does); piper/nvidia/mistral voices are heard via the on-instance test."""
+    provider = (body.provider or "").strip()
+
+    if body.kind == "llm":
+        if not body.model:
+            return {"ok": False, "message": "no model selected"}
+        key = vault_mod.provider_api_key(provider)
+        if not key and provider != "ollama":
+            return {"ok": False, "message": f"no {provider!r} key in the vault — add one first"}
+        return env_tool.pipeline_test_llm(provider, body.model, key or "")
+
+    if body.kind == "tts":
+        if provider == "zenmux":
+            key = vault_mod.provider_api_key("zenmux")
+            if not key:
+                return {"ok": False, "message": "no zenmux key in the vault"}
+            return env_tool.tts_sample_zenmux(key, body.model or "", body.voice or "", body.text or "Hello.")
+        if provider == "google":
+            sa = _google_sa_info()
+            if not sa:
+                return {"ok": False, "message": "no Google service-account file (google_tts.json) in the vault"}
+            return env_tool.tts_sample_google(sa, body.voice or "", body.text or "Hello.")
+        if provider == "mistral":
+            key = vault_mod.provider_api_key("mistral")
+            if not key:
+                return {"ok": False, "message": "no mistral key in the vault"}
+            return env_tool.tts_sample_mistral(key, body.model or "", body.voice or "", body.text or "Hola.")
+        return {"ok": False, "message": f"audio preview for {provider} needs the on-instance test "
+                "(agent endpoint + deploy) — Google, Mistral and ZenMux are testable from the console today"}
+
+    if body.kind == "stt_conn":
+        key = vault_mod.provider_api_key(provider)
+        if not key and provider != "ollama":
+            return {"ok": False, "message": f"no {provider!r} key in the vault — add one first"}
+        return env_tool.pipeline_stt_connection(provider, key or "")
+
+    if body.kind == "stt":
+        if provider == "mistral":
+            key = vault_mod.provider_api_key("mistral")
+            if not key:
+                return {"ok": False, "message": "no mistral key in the vault"}
+            if not body.audio:
+                return {"ok": False, "message": "no audio recorded"}
+            return env_tool.stt_transcribe_mistral(key, body.audio, body.language)
+        return {"ok": False, "message": f"transcription for {provider} needs the on-instance test "
+                "(agent endpoint + deploy) — Mistral (Voxtral) works from the console today"}
+
+    return {"ok": False, "message": f"unknown test kind {body.kind!r}"}
+
+
+# --- operator-controlled model registry + per-client model assignments ------
+
+class ModelRegistryIn(BaseModel):
+    id: str
+    provider: str = ""
+    role: str
+    label: str | None = None
+    notes: str | None = None
+    price: dict[str, Any] | None = None
+
+
+class ModelRemoveIn(BaseModel):
+    id: str
+    provider: str | None = None
+
+
+class ModelAssignIn(BaseModel):
+    client_name: str
+    slot: str
+    model_id: str
+
+
+class ModelReconcileIn(BaseModel):
+    client_name: str | None = None   # None = reconcile every client
+
+
+@router.get("/models/slots")
+def models_slots() -> dict[str, Any]:
+    """The model-bearing config slots (llm / voice_llm / voice_stt), each with
+    its config field + required role — the UI builds the assignment matrix
+    columns from this."""
+    return model_registry_mod.SLOTS
+
+
+# --- operator voice allow-list (the Catalog-tab curation layer) -------------
+
+class VoiceApproveIn(BaseModel):
+    id: str
+    provider: str = ""
+    # optional metadata — carried for LIVE-browsed voices (e.g. Mistral) that
+    # aren't in the static catalog; ignored when the id is already in it.
+    lang: str | None = None
+    gender: str | None = None
+    tier: str | None = None
+    label: str | None = None
+    eu_resident: bool | None = None
+
+
+@router.get("/voices/registry")
+def voices_registry(provider: str | None = None) -> list[dict[str, Any]]:
+    """The operator-APPROVED voice allow-list — what the Pipeline's voice picker
+    selects from (optionally filtered by provider). Curation lives in the
+    Catalog; the Pipeline only selects."""
+    return voice_registry_mod.list_registry(provider=provider)
+
+
+@router.get("/voices/catalog")
+def voices_catalog(provider: str | None = None, eu_only: bool = False) -> list[dict[str, Any]]:
+    """The browsable voice superset (each annotated approved: true/false) — the
+    Catalog tab's browse-and-approve source. eu_only=true hides non-EU voices."""
+    return voice_registry_mod.browse(provider=provider,
+                                     eu_resident=True if eu_only else None)
+
+
+@router.get("/provider-voices")
+def provider_voices(provider: str) -> dict[str, Any]:
+    """LIVE voice list from the provider's API (currently Mistral), the
+    account-specific analogue of /provider-models. Each voice is annotated
+    approved: true/false against the registry so the Catalog browse can show
+    Approve / approved ✓. Google/piper/etc. use the static /voices/catalog."""
+    provider = (provider or "").strip()
+    approved = voice_registry_mod.approved_ids()
+    if provider == "mistral":
+        key = vault_mod.provider_api_key("mistral")
+        if not key:
+            return {"ok": False, "message": "no mistral key in the vault", "voices": []}
+        res = env_tool.list_voices_mistral(key)
+        if not res.get("ok"):
+            return {"ok": False, "message": res.get("message"), "voices": []}
+        out = []
+        for v in res["voices"]:
+            # Voxtral presets carry a NATIVE ACCENT — the voice name is locale-
+            # prefixed (en-GB-…, fr-FR-…). Surface that locale so the operator
+            # doesn't put an en-GB voice on the Spanish slot (it'd speak Spanish
+            # with an English accent). Prefer an explicit single language; else
+            # parse the name prefix; else "multi".
+            langs = v.get("languages") or []
+            nm = str(v.get("name") or v["id"])
+            p = nm.split("-")
+            if len(langs) == 1:
+                lang = langs[0]
+            elif len(p) >= 2 and len(p[0]) == 2 and len(p[1]) == 2 and p[0].isalpha() and p[1].isalpha():
+                lang = f"{p[0]}-{p[1]}"
+            else:
+                lang = "multi"
+            out.append({"id": v["id"], "provider": "mistral", "lang": lang,
+                        "gender": v.get("gender") or "", "tier": "Preset",
+                        "label": v.get("name") or v["id"], "eu_resident": True,
+                        "approved": v["id"] in approved})
+        return {"ok": True, "voices": out}
+    return {"ok": False, "message": f"live voice browse isn't supported for {provider!r} "
+            "(use the static catalog)", "voices": []}
+
+
+@router.post("/voices/registry")
+def voices_registry_add(body: VoiceApproveIn) -> dict[str, Any]:
+    meta = {"provider": body.provider, "lang": body.lang, "gender": body.gender,
+            "tier": body.tier, "label": body.label, "eu_resident": body.eu_resident}
+    res = voice_registry_mod.approve_voice(body.id, body.provider, meta=meta)
+    if not res["ok"]:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+@router.post("/voices/registry/remove")
+def voices_registry_remove(body: VoiceApproveIn) -> dict[str, Any]:
+    res = voice_registry_mod.remove_voice(body.id, body.provider or None)
+    if not res["ok"]:
+        raise HTTPException(status_code=404, detail=res["error"])
+    return res
+
+
+@router.get("/models/registry")
+def models_registry(role: str | None = None, provider: str | None = None) -> list[dict[str, Any]]:
+    """The operator-approved model allow-list, optionally filtered by role or
+    provider (the dropdown source for assignments)."""
+    return model_registry_mod.list_registry(role=role, provider=provider)
+
+
+@router.post("/models/registry")
+def models_registry_add(body: ModelRegistryIn) -> dict[str, Any]:
+    res = model_registry_mod.add_model(body.id, body.provider, body.role,
+                                       body.label, body.notes, body.price)
+    if not res["ok"]:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+@router.post("/models/registry/remove")
+def models_registry_remove(body: ModelRemoveIn) -> dict[str, Any]:
+    # POST (not DELETE /{id}) because model ids contain slashes (provider/model).
+    res = model_registry_mod.remove_model(body.id, body.provider)
+    if not res["ok"]:
+        raise HTTPException(status_code=404, detail=res["error"])
+    return res
+
+
+@router.get("/models/assignments")
+def models_assignments() -> list[dict[str, Any]]:
+    """Every client -> slot -> approved model record — the per-client model
+    tracking the ledger's usage/overage billing joins against."""
+    return model_registry_mod.list_model_assignments()
+
+
+@router.post("/models/assign")
+def models_assign(body: ModelAssignIn) -> dict[str, Any]:
+    """Assign an APPROVED model to a client's slot: writes model + provider to
+    the instance and records the assignment. A model not in the registry is
+    refused (operator governance). Blocked on frozen clients (recreates the
+    container), same as a credential apply."""
+    client = _client_or_404(body.client_name)
+    _refuse_frozen(body.client_name, "assigning a model")
+    res = model_registry_mod.assign_model(client, body.slot, body.model_id)
+    if not res["ok"]:
+        raise HTTPException(status_code=400, detail=res["error"])
+    return res
+
+
+@router.post("/models/reconcile")
+def models_reconcile(body: ModelReconcileIn) -> dict[str, Any]:
+    """Read each client's LIVE site_config, record what model each slot runs,
+    and flag any model NOT in the registry as un-approved. Read-only toward the
+    instances (safe for frozen clients)."""
+    if body.client_name:
+        clients = [_client_or_404(body.client_name)]
+    else:
+        clients = cfg.load_clients()
+    reports = [model_registry_mod.reconcile_models(c) for c in clients]
+    return {"ok": all(r.get("ok") for r in reports) if reports else True, "reports": reports}
 
 
 @router.get("/vault/assignments")
@@ -1499,6 +1849,26 @@ def config_catalog() -> list[dict[str, Any]]:
     return config_manager_mod.FIELD_GROUPS
 
 
+@router.get("/providers")
+def providers() -> dict[str, Any]:
+    """Canonical per-role provider lists — the SINGLE source for "which
+    providers are valid for a role", replacing the arrays hand-copied into
+    catalog.js (CAT_ROLES / CAT_VOICE_PROVIDERS), pipeline.js (PL_LANES),
+    setup.js (SU_BROWSE_PROVIDERS) and config_manager's llm_provider options.
+    Each entry: {name, label, voice_only, local}. Credential/env-key metadata
+    stays in /api/vault/kinds."""
+    return providers_mod.by_role()
+
+
+@router.get("/eu-voice-providers")
+def eu_voice_providers() -> dict[str, Any]:
+    """The canonical EU voice-provider allow-list — the SINGLE source the
+    Pipeline's lane EU-check reads. It used to be hand-copied into pipeline.js
+    as PL_EU and had drifted (an extra 'whisper' the boot guard never allowed).
+    Mirrors the product's prod boot guard via validator.EU_VOICE_PROVIDERS."""
+    return {"providers": sorted(validator_mod.EU_VOICE_PROVIDERS)}
+
+
 @router.get("/clients/{name}/config")
 def client_config_get(name: str) -> dict[str, Any]:
     """Live config (API-first, SSH file fallback) + the vault's LLM-source
@@ -1511,6 +1881,22 @@ def client_config_get(name: str) -> dict[str, Any]:
     result["llm_source"] = config_manager_mod.llm_source_info(name)
     result["last_written"] = config_manager_mod.get_written(name)
     return result
+
+
+@router.get("/clients/{name}/tts-voices")
+def client_tts_voices(name: str) -> dict[str, Any]:
+    """The voice catalog THIS clinic's agent actually supports — its
+    backend/voice/tts_voices.yaml, served by the instance's
+    /admin/config/tts-voices. Per-provider, each voice tagged eu_resident.
+    The Pipeline tab's voice picker sources from this (not the console's own
+    google-only catalog) so the offered voices always match the selected
+    provider — no more feeding a Google id to Mistral."""
+    client = _client_or_404(name)
+    try:
+        data = core._admin_get_json(client, "/admin/config/tts-voices", {})
+    except Exception as e:
+        return {"providers": {}, "voices": [], "error": str(e)}
+    return data or {"providers": {}, "voices": []}
 
 
 @router.put("/clients/{name}/config")

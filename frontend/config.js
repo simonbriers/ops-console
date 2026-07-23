@@ -14,13 +14,25 @@
 let cfgCatalog = null;      // [{key,title,fields:[...]}] from /api/config-catalog
 let cfgCurrent = null;      // last GET /api/clients/{name}/config payload
 let cfgOriginal = {};       // field name -> value as loaded (change tracking)
-let cfgModelCatalog = null; // {catalog:[...], roles:[...], rates:[...]} from /api/model-catalog
 let cfgOpenGroups = new Set();  // accordion: which section keys are expanded (kept across reloads)
-
-// Sentinel select value that reveals the free-text box, so a type:"model"
-// field is a real dropdown of catalog models AND still lets you type an
-// unlisted model to test.
-const CFG_MODEL_CUSTOM = "__custom__";
+// Provider/model fields live on the Model Setup tab — hidden here so there's one
+// place to set them. Computed from the catalog (every type:"model" field + its
+// sibling provider field) rather than a hand-kept name list, so a new model field
+// can't leak onto this tab. This used to be a literal Set that had already
+// drifted (voice_tts_model was missing) — see docs/DUPLICATION_AUDIT.md 1.3.
+let cfgModelFieldsHidden = new Set();
+function computeCfgModelFieldsHidden(catalog) {
+  const hide = new Set();
+  for (const group of catalog || []) {
+    for (const f of (group.fields || [])) {
+      if (f.type === "model") {
+        hide.add(f.name);
+        if (f.provider_field) hide.add(f.provider_field);
+      }
+    }
+  }
+  return hide;
+}
 
 async function refreshConfigPage() {
   if (!cfgCatalog) {
@@ -31,49 +43,10 @@ async function refreshConfigPage() {
       return;
     }
   }
-  if (!cfgModelCatalog) {
-    try {
-      cfgModelCatalog = await (await fetch("/api/model-catalog")).json();
-    } catch {
-      cfgModelCatalog = { catalog: [], roles: [], rates: [] };  // fall back to free text
-    }
-  }
+  cfgModelFieldsHidden = computeCfgModelFieldsHidden(cfgCatalog);
   await populateCfgClientSelect();
 }
 
-// Catalog entries offered for a type:"model" field: filtered by the field's
-// role and, when the sibling provider field's value is known and matches at
-// least one entry, by that provider too.
-function cfgModelsForField(f) {
-  const all = (cfgModelCatalog && cfgModelCatalog.catalog) || [];
-  let subset = f.role ? all.filter((m) => m.role === f.role) : all.slice();
-  const prov = f.provider_field ? cfgOriginal[f.provider_field] : "";
-  if (prov) {
-    const byProv = subset.filter((m) => String(m.provider) === String(prov));
-    if (byProv.length) subset = byProv;
-  }
-  return subset;
-}
-
-// One-line price label in the model's native unit (D1: LLM per 1M tokens,
-// STT per audio-minute, TTS per character).
-function cfgModelPriceLabel(m) {
-  if (m.role === "llm") {
-    return `€${m.buy_in_per_m}/${m.buy_out_per_m} per 1M in/out · cached €${m.buy_cached_per_m}`;
-  }
-  if (m.unit === "audio_minute") return `€${m.buy_per_unit}/min`;
-  if (m.unit === "character") return `€${m.buy_per_unit}/char`;
-  return "";
-}
-
-// Show/hide the free-text box when a model <select> is set to Custom.
-function cfgOnModelSelect(name) {
-  const sel = document.getElementById(`cfgField-${name}`);
-  const custom = document.getElementById(`cfgField-${name}-custom`);
-  if (!sel || !custom) return;
-  if (sel.value === CFG_MODEL_CUSTOM) { custom.style.display = ""; custom.focus(); }
-  else custom.style.display = "none";
-}
 
 async function populateCfgClientSelect() {
   const sel = $("cfgClientSelect");
@@ -166,6 +139,10 @@ function renderCfgGroups(values) {
   const managedInstance = !!(cfgCurrent && cfgCurrent.managed);
   const html = cfgCatalog.map((group) => {
     const rows = group.fields.map((f) => {
+      // Provider/model selection now lives on the Model Setup tab (one place).
+      // Hide those fields here so Config stops competing; they're not read or
+      // saved from this page anymore.
+      if (cfgModelFieldsHidden.has(f.name)) return "";
       const val = values[f.name];
       cfgOriginal[f.name] = normalizeCfgValue(f, val);
       return cfgFieldRow(f, val, managedInstance);
@@ -222,23 +199,9 @@ function cfgFieldRow(f, val, managedInstance) {
     input = `<textarea id="${id}" rows="2">${escapeHtml(String(v))}</textarea>`;
   } else if (f.type === "number") {
     input = `<input type="number" step="any" id="${id}" value="${escapeHtml(String(v))}" />`;
-  } else if (f.type === "model") {
-    // Real dropdown of catalog models (price in the label) + a Custom option
-    // that reveals a text box, so unlisted models are still testable.
-    const models = cfgModelsForField(f);
-    const curr = String(v === null || v === undefined ? "" : v);
-    const inList = models.some((m) => m.id === curr);
-    const opts = [`<option value="">(unset)</option>`]
-      .concat(models.map((m) =>
-        `<option value="${escapeHtml(m.id)}" ${curr === m.id ? "selected" : ""}>` +
-        `${escapeHtml(m.id)} — ${escapeHtml(cfgModelPriceLabel(m))}${m.default ? " (default)" : ""}</option>`))
-      .concat([`<option value="${CFG_MODEL_CUSTOM}" ${(!inList && curr) ? "selected" : ""}>Custom / other…</option>`]);
-    const customShown = !inList && curr;
-    input =
-      `<select id="${id}" onchange="cfgOnModelSelect('${f.name}')">${opts.join("")}</select>` +
-      `<input id="${id}-custom" class="cfg-model-custom" placeholder="type a model id" ` +
-      `value="${customShown ? escapeHtml(curr) : ""}" style="${customShown ? "" : "display:none"}" />`;
   } else {  // text / password
+    // (Provider/model fields are hidden on this tab — see cfgModelFieldsHidden;
+    // their picker lives on the Model Setup tab, so no type:"model" branch here.)
     input = `<input type="${f.type === "password" ? "password" : "text"}" id="${id}" value="${escapeHtml(String(v))}" />`;
   }
   return `
@@ -264,10 +227,6 @@ function readCfgField(f) {
     if (raw === "") return null;  // "unset" — will be skipped as unchanged unless it changed
     const n = Number(raw);
     return Number.isNaN(n) ? null : n;
-  }
-  if (f.type === "model" && el.value === CFG_MODEL_CUSTOM) {
-    const custom = document.getElementById(`cfgField-${f.name}-custom`);
-    return custom ? custom.value.trim() : "";
   }
   return el.value;
 }
