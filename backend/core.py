@@ -1640,12 +1640,20 @@ def recreate_app(ssh_target: str, remote_dir: str) -> dict[str, Any]:
     `docker restart` silently keeps the old environment (bit us live,
     2026-07-19). `cd` into the checkout so compose finds the base +
     override files, and pin -p as always (see the project-name incident in
-    README)."""
+    README).
+
+    --force-recreate is REQUIRED: a plain `up -d` only recreates when the
+    container SPEC changed (image/env/mounts). A change to a config FILE on a
+    volume — e.g. set_managed() flipping site.managed in /data/site_config.yaml,
+    or any write when .env already had the value — leaves the spec identical, so
+    `up -d` would no-op and the old process keeps serving its cached config
+    (the 2026-07-23 managed-mode "verify reports managed=False" bug). Forcing the
+    recreate makes the app re-read both env AND its on-disk config every time."""
     if not ssh_target or not remote_dir:
         return {"ok": False, "error": "no ssh_target/remote_dir configured"}
     shell_dir = _shell_remote_dir(remote_dir.rstrip("/"))
     project = _project_name(remote_dir)
-    cmd = (f"cd {shell_dir} && docker compose -p {project} up -d app 2>&1 "
+    cmd = (f"cd {shell_dir} && docker compose -p {project} up -d --force-recreate app 2>&1 "
            f"&& echo ===RECREATE_OK===")
     ok, out = run_ssh(ssh_target, cmd, timeout=120)
     if not ok or "===RECREATE_OK===" not in out:
